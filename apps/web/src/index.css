@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /*
+     * Identidade visual da WEB DISTRIBUIDORA.
+     * these valores sao a FONTE UNICA de cor do sistema.
+     * Para ajustar a identidade, edite apenas este bloco.
+     */
+    --background: 210 20% 98%;
+    --foreground: 213 31% 12%;
+
+    --primary: 213 63% 16%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 20% 94%;
+    --secondary-foreground: 213 31% 12%;
+
+    --muted: 210 20% 95%;
+    --muted-foreground: 213 12% 42%;
+
+    --accent: 32 95% 50%;
+    --accent-foreground: 213 63% 10%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 55% 33%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 45%;
+    --warning-foreground: 0 0% 100%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 213 31% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 213 31% 12%;
+
+    --input: 213 18% 85%;
+    --ring: 32 95% 50%;
+
+    --border: 213 18% 88%;
+
+    --sidebar: 213 63% 13%;
+    --sidebar-foreground: 210 20% 92%;
+    --sidebar-accent: 213 45% 20%;
+    --sidebar-border: 213 40% 22%;
+
+    --chart-1: 213 63% 32%;
+    --chart-2: 32 95% 50%;
+    --chart-3: 152 55% 38%;
+    --chart-4: 0 72% 52%;
+    --chart-5: 268 45% 52%;
+
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    /* Evita zoom involuntario em iOS ao focar inputs de fonte <16px */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Foco visivel e consistente: acessibilidade de teclado. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+
+  /* Esconde os numeros de input de seta, que atrapalham no PDV. */
+  input[type='number']::-webkit-outer-spin-button,
+  input[type='number']::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+  }
+}
+
+@layer components {
+  /* Area de toque minima em telas de toque (PDV em tablet/celular). */
+  .touch-target {
+    @apply min-h-[44px];
+  }
+
+  .card-hover {
+    @apply transition-colors hover:border-accent/50;
+  }
+
+  /* Esqueleto de carregamento. */
+  .skeleton {
+    @apply relative overflow-hidden bg-muted rounded;
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/40 to-transparent;
+    content: '';
+  }
+
+  /* Tabela densa para telas de gestao. */
+  .table-compact th {
+    @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground;
+  }
+  .table-compact td {
+    @apply px-3 py-2 text-sm;
+  }
+  .table-compact tbody tr {
+    @apply border-b border-border/60 last:border-0;
+  }
+  .table-compact tbody tr:hover {
+    @apply bg-muted/50;
+  }
+}
+
+/* Impressao: usado em cupons e relatorios. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    @apply bg-white text-black;
+  }
+}

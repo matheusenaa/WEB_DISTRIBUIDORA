@@ -1,0 +1,366 @@
+// =====================================================================
+// WEB DISTRIBUIDORA - Schema do banco de dados
+// =====================================================================
+// Convencoes:
+//  * Todo valor monetario e INTEGER em CENTAVOS. Nunca float.
+//  * Strings usadas como enum (SQLite nao suporta enum nativo).
+//    Ao migrar para PostgreSQL, converter para enum nativo.
+//  * Datas sao DateTime em UTC. Fuso do negocio e aplicado na borda.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// USUARIOS E AUTENTICACAO
+// ---------------------------------------------------------------------
+
+model User {
+  id           Int       @id @default(autoincrement())
+  name         String
+  username     String    @unique
+  email        String    @unique
+  passwordHash String
+  role         String    @default("VENDEDOR") // ADMIN | VENDEDOR
+  status       String    @default("ATIVO") // ATIVO | BLOQUEADO
+  commissionPercent Int  @default(0)
+  lastAccessAt DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  salesAsSeller   Sale[]           @relation("SaleSeller")
+  salesAsOperator Sale[]           @relation("SaleOperator")
+  stockMovements  StockMovement[]
+  cashSessions    CashSession[]
+  cashMovements   CashMovement[]
+  auditLogs       AuditLog[]
+  refreshTokens   RefreshToken[]
+
+  @@index([role])
+  @@index([status])
+  @@map("users")
+}
+
+/// Tokens de renovacao persistidos para permitir revogacao (logout real).
+model RefreshToken {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  tokenHash  String   @unique
+  userAgent  String?
+  ip         String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------
+// CADASTROS
+// ---------------------------------------------------------------------
+
+model Category {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+
+  @@index([active])
+  @@map("categories")
+}
+
+model Brand {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@index([active])
+  @@map("brands")
+}
+
+model Supplier {
+  id        Int      @id @default(autoincrement())
+  name      String
+  document  String?
+  email     String?
+  phone     String?
+  address   String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@index([name])
+  @@index([active])
+  @@map("suppliers")
+}
+
+model Customer {
+  id        Int      @id @default(autoincrement())
+  name      String
+  document  String?
+  email     String?
+  phone     String?
+  address   String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sales Sale[]
+
+  @@index([name])
+  @@index([document])
+  @@map("customers")
+}
+
+// ---------------------------------------------------------------------
+// PRODUTOS
+// ---------------------------------------------------------------------
+
+model Product {
+  id               Int     @id @default(autoincrement())
+  internalCode     String? @unique
+  barcode          String? @unique
+  name             String
+  description      String?
+  categoryId       Int?
+  brandId          Int?
+  supplierId       Int?
+  costPrice        Int     @default(0) // centavos
+  salePrice        Int     @default(0) // centavos
+  stock            Int     @default(0)
+  minStock         Int     @default(0)
+  maxStock         Int?
+  unit             String  @default("UN")
+  status           String  @default("ATIVO") // ATIVO | INATIVO
+  saleObservation  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  category       Category?       @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brand          Brand?          @relation(fields: [brandId], references: [id], onDelete: SetNull)
+  supplier       Supplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  stockMovements StockMovement[]
+  saleItems      SaleItem[]
+
+  @@index([name])
+  @@index([barcode])
+  @@index([status])
+  @@index([categoryId])
+  @@index([supplierId])
+  @@index([stock])
+  @@map("products")
+}
+
+// ---------------------------------------------------------------------
+// MOVIMENTACOES DE ESTOQUE
+// ---------------------------------------------------------------------
+// Registro imutavel e append-only. `previousStock`/`resultingStock`
+// permitem reconstruir a historia exata de qualquer produto.
+
+model StockMovement {
+  id             Int      @id @default(autoincrement())
+  type           String // ENTRADA | SAIDA | AJUSTE | DEVOLUCAO | PERDA | TRANSFERENCIA_SAIDA | TRANSFERENCIA_ENTRADA
+  productId      Int
+  quantity       Int // sempre positivo; o `type` define o sinal
+  previousStock  Int
+  resultingStock Int
+  reason         String
+  documentNumber String?
+  unitCost       Int?
+  userId         Int
+  saleId         Int?
+  createdAt      DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  sale    Sale?   @relation(fields: [saleId], references: [id], onDelete: SetNull)
+
+  @@index([productId, createdAt])
+  @@index([type])
+  @@index([createdAt])
+  @@index([saleId])
+  @@map("stock_movements")
+}
+
+// ---------------------------------------------------------------------
+// VENDAS
+// ---------------------------------------------------------------------
+
+model Sale {
+  id                Int      @id @default(autoincrement())
+  number            Int      @unique // sequencia incremental legivel
+  sellerId          Int
+  userId            Int
+  customerId        Int?
+  subtotal          Int      @default(0)
+  discountCents     Int      @default(0)
+  total             Int      @default(0)
+  costTotal         Int      @default(0)
+  paymentMethod     String
+  amountPaidCents   Int      @default(0)
+  changeCents       Int      @default(0)
+  status            String   @default("CONCLUIDA") // CONCLUIDA | CANCELADA
+  notes             String?
+  canceledAt        DateTime?
+  cancelReason      String?
+  createdAt         DateTime @default(now())
+
+  seller   User     @relation("SaleSeller", fields: [sellerId], references: [id], onDelete: Restrict)
+  user     User     @relation("SaleOperator", fields: [userId], references: [id], onDelete: Restrict)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  items    SaleItem[]
+  payments SalePayment[]
+  stockMovements StockMovement[]
+  cashMovements  CashMovement[]
+  cashSessionId  Int?
+  cashSession    CashSession? @relation(fields: [cashSessionId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([sellerId, createdAt])
+  @@index([status])
+  @@index([paymentMethod])
+  @@index([customerId])
+  @@map("sales")
+}
+
+model SaleItem {
+  id              Int   @id @default(autoincrement())
+  saleId          Int
+  productId       Int
+  productName     String // snapshot: sobrevive a renomeacao do produto
+  productUnit     String
+  barcode         String?
+  quantity        Int
+  unitPrice       Int
+  costPrice       Int
+  discountPercent Float  @default(0)
+  discountCents   Int    @default(0)
+  subtotal        Int
+
+  sale    Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([saleId])
+  @@index([productId])
+  @@map("sale_items")
+}
+
+/// Forma como o pagamento foi efetivamente dividido (pix + dinheiro, etc.).
+/// Permite evolucao sem alterar a tabela de vendas.
+model SalePayment {
+  id        Int      @id @default(autoincrement())
+  saleId    Int
+  method    String
+  amountCents Int
+  createdAt DateTime @default(now())
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+
+  @@index([saleId])
+  @@map("sale_payments")
+}
+
+// ---------------------------------------------------------------------
+// CAIXA
+// ---------------------------------------------------------------------
+
+model CashSession {
+  id                   Int       @id @default(autoincrement())
+  status               String    @default("ABERTO") // ABERTO | FECHADO
+  userId               Int
+  initialAmountCents   Int       @default(0)
+  expectedAmountCents  Int? // congelado no fechamento
+  reportedAmountCents  Int?
+  differenceCents      Int?
+  openedAt             DateTime  @default(now())
+  closedAt             DateTime?
+  notes                String?
+
+  user       User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  movements  CashMovement[]
+  sales      Sale[]
+
+  @@index([status])
+  @@index([userId, openedAt])
+  @@index([openedAt])
+  @@map("cash_sessions")
+}
+
+model CashMovement {
+  id          Int      @id @default(autoincrement())
+  cashSessionId Int
+  type        String // ENTRADA | SAIDA
+  kind        String // VENDA | OUTRA_ENTRADA | DESPESA | PAGAMENTO | RETIRADA | SANGRIA | SUPRIMENTO | ESTORNO
+  amountCents Int
+  description String
+  saleId      Int?
+  userId      Int
+  createdAt   DateTime @default(now())
+
+  cashSession CashSession @relation(fields: [cashSessionId], references: [id], onDelete: Cascade)
+  sale        Sale?       @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  user        User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([cashSessionId, createdAt])
+  @@index([type])
+  @@map("cash_movements")
+}
+
+// ---------------------------------------------------------------------
+// AUDITORIA
+// ---------------------------------------------------------------------
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  userId      Int?
+  userName    String?
+  action      String
+  entity      String?
+  entityId    String?
+  description String
+  before      String? // JSON serializado
+  after       String? // JSON serializado
+  ip          String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([userId, createdAt])
+  @@index([action])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------
+// CONFIGURACOES
+// ---------------------------------------------------------------------
+
+model SystemSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("system_settings")
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@webdist/desktop",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "build": "npm run tauri:build",
+    "typecheck": "echo 'no tsconfig for desktop workspace'"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0"
+  }
+}

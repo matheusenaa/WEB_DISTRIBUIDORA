@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WEB DISTRIBUIDORA",
+  "version": "1.0.0",
+  "identifier": "br.com.webdistribuidora.app",
+  "build": {
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "WEB DISTRIBUIDORA",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' http://127.0.0.1:3333 http://localhost:3333"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Gestao de distribuidora",
+    "longDescription": "Sistema completo de gestao para distribuidora: catalogo, estoque, PDV, caixa, relatorios e auditoria.",
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "languages": ["PortugueseBR"],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

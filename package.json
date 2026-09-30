@@ -1,0 +1,45 @@
+{
+  "name": "web-distribuidora",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sistema de gestao para a WEB DISTRIBUIDORA",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "db:generate": "npm run db:generate -w @webdist/api",
+    "db:push": "npm run db:push -w @webdist/api",
+    "db:migrate": "npm run db:migrate -w @webdist/api",
+    "db:seed": "npm run db:seed -w @webdist/api",
+    "db:reset": "npm run db:reset -w @webdist/api",
+    "db:studio": "npm run db:studio -w @webdist/api",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev -w @webdist/api",
+    "dev:web": "npm run dev -w @webdist/web",
+    "build": "npm run build -w @webdist/shared && npm run build -w @webdist/api && npm run build -w @webdist/web && npm run build -w @webdist/desktop",
+    "build:api": "npm run build -w @webdist/api",
+    "build:web": "npm run build -w @webdist/web",
+    "start": "npm run start -w @webdist/api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "backup": "node --no-warnings scripts/backup.mjs",
+    "setup": "npm install && npm run build -w @webdist/shared && npm run db:generate && npm run db:push && npm run db:seed",
+    "predev": "npm run build -w @webdist/shared",
+    "prestart": "npm run build -w @webdist/shared",
+    "build:shared": "npm run build -w @webdist/shared",
+    "build:desktop": "npm run build -w @webdist/desktop",
+    "tauri:dev": "npm run tauri dev -w @webdist/desktop",
+    "tauri:build": "npm run tauri build -w @webdist/desktop"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.4.3",
+    "vitest": "^3.2.4"
+  }
+}
