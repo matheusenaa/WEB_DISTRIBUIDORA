@@ -14,6 +14,13 @@ import { connectDatabase } from '../../lib/prisma.js';
 import { recordAudit } from '../../lib/audit.js';
 import { config } from '../../env.js';
 import type { AuthUser } from '../../plugins/auth.js';
+import { mkdir, readdir, rm, stat, readFile, rename } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { pipeline } from 'node:stream/promises';
+import { createGunzip, createGzip } from 'node:zlib';
+import { DatabaseSync } from 'node:sqlite';
 
 /**
  * Definicoes de regras de negocio gravadas no banco.
@@ -188,5 +195,244 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
         permissions: ROLE_PERMISSIONS[role] as readonly Permission[],
       })),
     };
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* BACKUP / RESTORE                                                 */
+  /* ---------------------------------------------------------------- */
+
+  function humanSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  /** Resolve o caminho do .sqlite a partir de DATABASE_URL no .env. */
+  async function resolveDatabaseFile(): Promise<string> {
+    // Em desenvolvimento (tsx), import.meta.url aponta para o arquivo .ts fonte.
+    // Em producao (build), aponta para o arquivo .js em dist/.
+    // Precisamos encontrar a raiz do repositorio de forma robusta.
+    const currentFile = fileURLToPath(import.meta.url);
+    let root = resolve(dirname(currentFile), '../../../..');
+    
+    // Verifica se achou o .env na raiz calculada; se nao, tenta subir mais um nivel
+    // (caso esteja rodando de dist/ em producao)
+    try {
+      await readFile(join(root, '.env'), 'utf8');
+    } catch {
+      root = resolve(root, '..');
+    }
+    
+    let url = 'file:./dev.db';
+    try {
+      const content = await readFile(join(root, '.env'), 'utf8');
+      const match = content.match(/^\s*DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m);
+      if (match?.[1]) url = match[1].trim();
+    } catch {
+      // .env ausente: usa o padrao do .env.example.
+    }
+
+    if (!url.startsWith('file:')) {
+      throw new Error('DATABASE_URL nao aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
+    }
+
+    // O Prisma resolve caminhos relativos a pasta prisma/.
+    const resolvedPath = resolve(root, 'apps', 'api', 'prisma', url.slice('file:'.length));
+    console.log('[resolveDatabaseFile] root:', root);
+    console.log('[resolveDatabaseFile] url:', url);
+    console.log('[resolveDatabaseFile] resolved:', resolvedPath);
+    return resolvedPath;
+  }
+
+  function timestamp(date = new Date()): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+      `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
+      `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+    );
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* POST /api/backup - criar backup manual                           */
+  /* ---------------------------------------------------------------- */
+  app.post('/backup', { preHandler: [app.requirePermission('settings:manage')] }, async (request, reply) => {
+    const actor = request.currentUser as AuthUser;
+
+    const dbFile = await resolveDatabaseFile();
+    const backupDir = join(resolve(dirname(dbFile), '../../..'), 'backups');
+    await mkdir(backupDir, { recursive: true });
+
+    const rawFile = join(backupDir, `webdist-${timestamp()}.db`);
+    const gzFile = `${rawFile}.gz`;
+
+    const database = new DatabaseSync(dbFile, { readOnly: true });
+    try {
+      database.exec(`VACUUM INTO '${rawFile.replace(/'/g, "''")}'`);
+    } finally {
+      database.close();
+    }
+
+    await pipeline(createReadStream(rawFile), createGzip(), createWriteStream(gzFile));
+    await rm(rawFile, { force: true });
+
+    const { size } = await stat(gzFile);
+
+    await recordAudit({
+      userId: actor.id,
+      userName: actor.username,
+      action: 'BACKUP_CREATE',
+      entity: 'Backup',
+      entityId: gzFile.split(/[\\/]/).pop()!,
+      description: `${actor.name} criou backup manual`,
+      request,
+    });
+
+    return reply.send({
+      ok: true,
+      file: gzFile.split(/[\\/]/).pop(),
+      size: humanSize(size),
+      message: 'Backup criado com sucesso.',
+    });
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* GET /api/backup - listar backups                                 */
+  /* ---------------------------------------------------------------- */
+  app.get('/backup', { preHandler: [app.requirePermission('settings:read')] }, async () => {
+    const backupDir = join(resolve(dirname(await resolveDatabaseFile()), '../../..'), 'backups');
+    try {
+      const existing = (await readdir(backupDir))
+        .filter((name) => /^webdist-\d{8}-\d{6}\.db\.gz$/.test(name))
+        .sort()
+        .reverse();
+
+      const files = await Promise.all(
+        existing.map(async (name) => {
+          const filePath = join(backupDir, name);
+          const { size, mtime } = await stat(filePath);
+          return { name, size: humanSize(size), sizeBytes: size, date: mtime.toISOString() };
+        }),
+      );
+
+      return { data: files };
+    } catch {
+      return { data: [] };
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* POST /api/restore - restaurar backup                             */
+  /* ---------------------------------------------------------------- */
+  app.post('/restore', { preHandler: [app.requirePermission('settings:manage')] }, async (request, reply) => {
+    const actor = request.currentUser as AuthUser;
+    const body = z.object({ fileName: z.string().min(1) }).parse(request.body);
+
+    if (!/^webdist-\d{8}-\d{6}\.db\.gz$/.test(body.fileName)) {
+      return reply.status(400).send({ ok: false, message: 'Nome de arquivo invalido.' });
+    }
+
+    const dbFile = await resolveDatabaseFile();
+    const backupDir = join(resolve(dirname(dbFile), '../../..'), 'backups');
+    const gzFile = join(backupDir, body.fileName);
+
+    try {
+      await stat(gzFile);
+    } catch {
+      return reply.status(404).send({ ok: false, message: 'Arquivo de backup nao encontrado.' });
+    }
+
+    // 1. Cria backup de seguranca do banco atual antes de restaurar
+    const safetyFile = join(backupDir, `webdist-pre-restore-${timestamp()}.db.gz`);
+    const database = new DatabaseSync(dbFile, { readOnly: true });
+    try {
+      database.exec(`VACUUM INTO '${safetyFile.replace(/.gz$/, '').replace(/'/g, "''")}'`);
+    } finally {
+      database.close();
+    }
+    await pipeline(createReadStream(safetyFile.replace(/.gz$/, '')), createGzip(), createWriteStream(safetyFile));
+    await rm(safetyFile.replace(/.gz$/, ''), { force: true });
+
+    // 2. Descompacta e prepara o restore
+    const tempDb = join(backupDir, `restore-${timestamp()}.db`);
+    await pipeline(createReadStream(gzFile), createGunzip(), createWriteStream(tempDb));
+
+    // Valida se o banco restaurado e consistente
+    const testDb = new DatabaseSync(tempDb, { readOnly: true });
+    try {
+      testDb.exec('PRAGMA integrity_check');
+    } finally {
+      testDb.close();
+    }
+
+    // Prepara o restore: move o arquivo restaurado para a pasta de backups como "pending restore"
+    const pendingRestoreFile = join(backupDir, `webdist-pending-restore-${timestamp()}.db`);
+    await rm(pendingRestoreFile, { force: true });
+    await rename(tempDb, pendingRestoreFile);
+
+    await recordAudit({
+      userId: actor.id,
+      userName: actor.username,
+      action: 'BACKUP_RESTORE_PREPARED',
+      entity: 'Backup',
+      entityId: body.fileName,
+      description: `${actor.name} preparou restore do backup: ${body.fileName}. Reinicie a aplicacao para concluir.`,
+      request,
+    });
+
+    return reply.send({
+      ok: true,
+      message: 'Restore preparado com sucesso. Reinicie a aplicacao (feche e abra novamente) para concluir a restauracao.',
+      pendingFile: pendingRestoreFile.split(/[\\/]/).pop(),
+    });
+
+    await recordAudit({
+      userId: actor.id,
+      userName: actor.username,
+      action: 'BACKUP_RESTORE',
+      entity: 'Backup',
+      entityId: body.fileName,
+      description: `${actor.name} restaurou backup: ${body.fileName}`,
+      request,
+    });
+
+    return reply.send({
+      ok: true,
+      message: 'Backup restaurado com sucesso. Reinicie a aplicacao para recarregar os dados.',
+    });
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* DELETE /api/backup/:fileName - excluir backup                    */
+  /* ---------------------------------------------------------------- */
+  app.delete('/backup/:fileName', { preHandler: [app.requirePermission('settings:manage')] }, async (request, reply) => {
+    const actor = request.currentUser as AuthUser;
+    const { fileName } = z.object({ fileName: z.string().min(1) }).parse(request.params);
+
+    if (!/^webdist-\d{8}-\d{6}\.db\.gz$/.test(fileName)) {
+      return reply.status(400).send({ ok: false, message: 'Nome de arquivo invalido.' });
+    }
+
+    const backupDir = join(resolve(dirname(await resolveDatabaseFile()), '../../..'), 'backups');
+    const gzFile = join(backupDir, fileName);
+
+    try {
+      await stat(gzFile);
+    } catch {
+      return reply.status(404).send({ ok: false, message: 'Arquivo nao encontrado.' });
+    }
+
+    await rm(gzFile, { force: true });
+
+    await recordAudit({
+      userId: actor.id,
+      userName: actor.username,
+      action: 'BACKUP_DELETE',
+      entity: 'Backup',
+      entityId: fileName,
+      description: `${actor.name} excluiu backup: ${fileName}`,
+      request,
+    });
+
+    return { ok: true, message: 'Backup excluido.' };
   });
 }
