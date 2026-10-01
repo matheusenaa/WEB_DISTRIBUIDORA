@@ -40,13 +40,25 @@ export const INBOUND_MOVEMENT_TYPES = [
 export const OUTBOUND_MOVEMENT_TYPES = [
   'SAIDA',
   'VENDA',
-  'CANCELAMENTO',
   'PERDA',
   'TRANSFERENCIA_SAIDA',
 ] as const satisfies readonly StockMovementType[];
 
 /** Tipos em que o sinal e definido pelo estoque final desejado. */
 export const ADJUSTMENT_MOVEMENT_TYPES = ['AJUSTE'] as const satisfies readonly StockMovementType[];
+
+/**
+ * Tipos documentais: NAO alteram o saldo.
+ *
+ * `CANCELAMENTO` registra que uma venda foi cancelada sem repor os itens
+ * em estoque (a mercadoria nao volta ao balcao). E lancado com o estoque
+ * real antes e depois, que sao iguais, para deixar o cancelamento visivel
+ * no historico sem inventar uma saida de mercadoria que nao aconteceu.
+ *
+ * Antes este tipo estava em `OUTBOUND_MOVEMENT_TYPES`, o que faria a API
+ * descontar a quantidade do saldo e potentially gerar estoque negativo.
+ */
+export const DOCUMENTAL_MOVEMENT_TYPES = ['CANCELAMENTO'] as const satisfies readonly StockMovementType[];
 
 export const SALE_STATUSES = ['CONCLUIDA', 'CANCELADA'] as const;
 export type SaleStatus = (typeof SALE_STATUSES)[number];
@@ -117,6 +129,10 @@ export const AUDIT_ACTIONS = [
   'CASH_EXIT',
   'EXPORT',
   'PASSWORD_CHANGE',
+  'BACKUP_CREATE',
+  'BACKUP_RESTORE_PREPARED',
+  'BACKUP_RESTORE_COMPLETED',
+  'BACKUP_DELETE',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

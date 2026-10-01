@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import type { StockMovementType } from '@webdist/shared';
 import {
   ADJUSTMENT_MOVEMENT_TYPES,
+  DOCUMENTAL_MOVEMENT_TYPES,
   INBOUND_MOVEMENT_TYPES,
   OUTBOUND_MOVEMENT_TYPES,
   STOCK_MOVEMENT_LABELS,
@@ -16,10 +17,16 @@ import { config } from '../../env.js';
  * relatorio de movimentacoes distinga uma saida comercial de uma perda
  * ou de um ajuste manual, sem precisar correlacionar com a tabela de
  * vendas.
+ *
+ * Todo tipo precisa estar em exatamente um destes conjuntos. Um tipo
+ * fora dos quatro nao teria sinal definido e passaria a-treated
+ * silenciosamente; a verificacao abaixo existe para fazer esse erro
+ * aparecer no log, e nao em um saldo de estoque errado.
  */
 const INBOUND: ReadonlySet<StockMovementType> = new Set<StockMovementType>(INBOUND_MOVEMENT_TYPES);
 const OUTBOUND: ReadonlySet<StockMovementType> = new Set<StockMovementType>(OUTBOUND_MOVEMENT_TYPES);
 const ADJUSTMENT: ReadonlySet<StockMovementType> = new Set<StockMovementType>(ADJUSTMENT_MOVEMENT_TYPES);
+const DOCUMENTAL: ReadonlySet<StockMovementType> = new Set<StockMovementType>(DOCUMENTAL_MOVEMENT_TYPES);
 
 export function isInbound(type: StockMovementType): boolean {
   return INBOUND.has(type);
@@ -31,6 +38,31 @@ export function isOutbound(type: StockMovementType): boolean {
 
 export function isAdjustment(type: StockMovementType): boolean {
   return ADJUSTMENT.has(type);
+}
+
+/** True quando o tipo e apenas um registro no historico, sem efeito no saldo. */
+export function isDocumental(type: StockMovementType): boolean {
+  return DOCUMENTAL.has(type);
+}
+
+/** Confere que todo tipo de movimentacao tem um sinal definido. */
+export function assertMovementTypesComplete(
+  all: readonly StockMovementType[],
+  onMissing: (type: StockMovementType) => void = (type) => {
+    throw new AppError(
+      'VALIDATION_ERROR',
+      `Tipo de movimentacao "${type}" nao tem sinal definido. Adicione-o a uma das listas em shared/enums.ts.`,
+    );
+  },
+): void {
+  for (const type of all) {
+    const count =
+      (isInbound(type) ? 1 : 0) +
+      (isOutbound(type) ? 1 : 0) +
+      (isAdjustment(type) ? 1 : 0) +
+      (isDocumental(type) ? 1 : 0);
+    if (count !== 1) onMissing(type);
+  }
 }
 
 export interface ApplyMovementInput {
@@ -100,6 +132,15 @@ export async function applyStockMovement(
     resultingStock = input.targetStock;
     delta = resultingStock - previousStock;
     quantity = Math.abs(delta);
+  } else if (isDocumental(input.type)) {
+    // Cancelamento sem devolucao: a mercadoria nao volta ao estoque, mas
+    // tambem nao consome nada agora - a saida ja ocorreu na venda. O
+    // registro existe para deixar o cancelamento visivel no historico,
+    // com estoque anterior e posterior iguais.
+    previousStock = current.stock;
+    resultingStock = current.stock;
+    delta = 0;
+    quantity = input.quantity;
   } else {
     previousStock = current.stock;
     delta = isInbound(input.type) ? input.quantity : -input.quantity;
@@ -122,6 +163,34 @@ export async function applyStockMovement(
   }
 
   // Atualizacao condicional: garante serializacao contra vendas concorrentes.
+  // Movimentacao documental nao escreve no saldo (delta 0), entao nao ha o
+  // que serializar e nao vale a pena tocar a linha do produto.
+  if (isDocumental(input.type)) {
+    const movement = await tx.stockMovement.create({
+      data: {
+        type: input.type,
+        productId: current.id,
+        quantity,
+        previousStock,
+        resultingStock,
+        reason: input.reason,
+        documentNumber: input.documentNumber ?? null,
+        unitCost: current.costPrice,
+        userId: input.userId,
+        saleId: input.saleId ?? null,
+        purchaseOrderId: input.purchaseOrderId ?? null,
+      },
+      select: { id: true },
+    });
+
+    return {
+      movementId: movement.id,
+      previousStock,
+      resultingStock,
+      unitCostApplied: current.costPrice,
+    };
+  }
+
   const updated = await tx.product.updateMany({
     where: isOutbound(input.type) || isAdjustment(input.type)
       ? allowNegative

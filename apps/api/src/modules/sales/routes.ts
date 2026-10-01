@@ -12,7 +12,7 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { recordAudit } from '../../lib/audit.js';
 import { createSale, maxDiscountForRole, saleIdParamSchema } from './service.js';
-import { restockSale } from '../stock/service.js';
+import { applyStockMovement, restockSale } from '../stock/service.js';
 import type { AuthUser } from '../../plugins/auth.js';
 
 const SALE_INCLUDE = {
@@ -265,19 +265,19 @@ export async function registerSaleRoutes(app: FastifyInstance): Promise<void> {
       if (restock) {
         await restockSale(tx, id, actor.id, `Cancelamento da venda #${sale.number}: ${reason}`);
       } else {
+        // Sem devolucao: a saida de estoque ja ocorreu na venda original, nao
+        // no cancelamento. Registramos `CANCELAMENTO` para deixar o fato
+        // visivel no historico sem alterar o saldo (estoque anterior e
+        // posterior iguais).
         for (const item of sale.items) {
-          await prisma.stockMovement.create({
-            data: {
-              type: 'SAIDA',
-              productId: item.productId,
-              quantity: item.quantity,
-              previousStock: 0,
-              resultingStock: 0,
-              reason: `Cancelamento sem devolucao - venda #${sale.number}: ${reason}`,
-              documentNumber: String(sale.number),
-              userId: actor.id,
-              saleId: id,
-            },
+          await applyStockMovement(tx, {
+            type: 'CANCELAMENTO',
+            productId: item.productId,
+            quantity: item.quantity,
+            reason: `Cancelamento sem devolucao - venda #${sale.number}: ${reason}`,
+            documentNumber: String(sale.number),
+            userId: actor.id,
+            saleId: id,
           });
         }
       }

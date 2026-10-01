@@ -20,7 +20,15 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  ARCHIVED_BACKUP_PATTERN,
+  BACKUP_FILE_PATTERN,
+  backupsDirFor,
+  randomSuffix,
+  timestamp,
+} from '../../lib/backup-files.js';
 
 /**
  * Definicoes de regras de negocio gravadas no banco.
@@ -237,19 +245,66 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     }
 
     // O Prisma resolve caminhos relativos a pasta prisma/.
-    const resolvedPath = resolve(root, 'apps', 'api', 'prisma', url.slice('file:'.length));
-    console.log('[resolveDatabaseFile] root:', root);
-    console.log('[resolveDatabaseFile] url:', url);
-    console.log('[resolveDatabaseFile] resolved:', resolvedPath);
-    return resolvedPath;
+    return resolve(root, 'apps', 'api', 'prisma', url.slice('file:'.length));
   }
 
-  function timestamp(date = new Date()): string {
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return (
-      `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
-      `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
-    );
+  /* ---------------- Registro de backups no banco ---------------- */
+  /*
+   * O arquivo .db.gz vive no disco; a tabela `backups` guarda o historico.
+   * A listagem cruza os dois: o disco manda no que existe de fato, o banco
+   * traz quem gerou e com que nota. Isso importa porque um arquivo pode ser
+   * copiado para a pasta por fora da aplicacao, e nesse caso ele precisa
+   * aparecer na tela mesmo sem registro.
+   */
+
+  async function checksumFile(path: string): Promise<string | null> {
+    try {
+      const hash = createHash('sha256');
+      await pipeline(createReadStream(path), hash);
+      return hash.digest('hex');
+    } catch {
+      // Checksum e um extra: falhar aqui nao pode impedir o backup.
+      return null;
+    }
+  }
+
+  async function registerBackup(input: {
+    fileName: string;
+    sizeBytes: number;
+    kind: 'MANUAL' | 'AUTOMATICO' | 'PRE_RESTORE';
+    userId: number | null;
+    note?: string;
+  }): Promise<void> {
+    try {
+      await prisma.backupRecord.upsert({
+        where: { fileName: input.fileName },
+        create: {
+          fileName: input.fileName,
+          sizeBytes: input.sizeBytes,
+          kind: input.kind,
+          status: 'VALIDO',
+          userId: input.userId,
+          note: input.note ?? null,
+          checksum: await checksumFile(join(await backupsPath(), input.fileName)),
+        },
+        // Um nome de arquivo so pode reaparecer com o mesmo conteudo; se
+        // reexecutar, o registro anterior e substituido.
+        update: {
+          sizeBytes: input.sizeBytes,
+          status: 'VALIDO',
+          userId: input.userId,
+          note: input.note ?? null,
+        },
+      });
+    } catch (error) {
+      // Registrar o historico nao pode derrubar a operacao de backup: o
+      // arquivo ja esta em disco e e isso que importa para o usuario.
+      console.error('[backup] falha ao registrar no banco:', error);
+    }
+  }
+
+  async function backupsPath(): Promise<string> {
+    return backupsDirFor(await resolveDatabaseFile());
   }
 
   /* ---------------------------------------------------------------- */
@@ -259,10 +314,12 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     const actor = request.currentUser as AuthUser;
 
     const dbFile = await resolveDatabaseFile();
-    const backupDir = join(resolve(dirname(dbFile), '../../..'), 'backups');
+    const backupDir = await backupsPath();
     await mkdir(backupDir, { recursive: true });
 
-    const rawFile = join(backupDir, `webdist-${timestamp()}.db`);
+    // Backup com o mesmo segundo sobrescreveria o anterior. Um sufixo curto
+    // de aleatoriedade mantem o historico sem depender de data apenas.
+    const rawFile = join(backupDir, `webdist-${timestamp()}-${randomSuffix()}.db`);
     const gzFile = `${rawFile}.gz`;
 
     const database = new DatabaseSync(dbFile, { readOnly: true });
@@ -276,6 +333,9 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     await rm(rawFile, { force: true });
 
     const { size } = await stat(gzFile);
+    const fileName = gzFile.split(/[\\/]/).pop()!;
+
+    await registerBackup({ fileName, sizeBytes: size, kind: 'MANUAL', userId: actor.id });
 
     await recordAudit({
       userId: actor.id,
@@ -299,25 +359,75 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
   /* GET /api/backup - listar backups                                 */
   /* ---------------------------------------------------------------- */
   app.get('/backup', { preHandler: [app.requirePermission('settings:read')] }, async () => {
-    const backupDir = join(resolve(dirname(await resolveDatabaseFile()), '../../..'), 'backups');
-    try {
-      const existing = (await readdir(backupDir))
-        .filter((name) => /^webdist-\d{8}-\d{6}\.db\.gz$/.test(name))
-        .sort()
-        .reverse();
+    const backupDir = await backupsPath();
 
-      const files = await Promise.all(
-        existing.map(async (name) => {
-          const filePath = join(backupDir, name);
-          const { size, mtime } = await stat(filePath);
-          return { name, size: humanSize(size), sizeBytes: size, date: mtime.toISOString() };
-        }),
+    let files: Array<{
+      name: string;
+      size: string;
+      sizeBytes: number;
+      date: string;
+      kind: string | null;
+      status: string | null;
+      note: string | null;
+      userName: string | null;
+    }> = [];
+
+    try {
+      const existing = (await readdir(backupDir)).filter((name) =>
+        ARCHIVED_BACKUP_PATTERN.test(name),
       );
 
-      return { data: files };
-    } catch {
+      const records = await prisma.backupRecord.findMany({
+        select: { fileName: true, kind: true, status: true, note: true, user: { select: { name: true } } },
+      });
+      const byName = new Map(records.map((r) => [r.fileName, r]));
+
+      files = await Promise.all(
+        existing.sort().reverse().map(async (name) => {
+          const { size, mtime } = await stat(join(backupDir, name));
+          const record = byName.get(name);
+          return {
+            name,
+            size: humanSize(size),
+            sizeBytes: size,
+            date: mtime.toISOString(),
+            // Arquivo copiado para a pasta por fora do sistema aparece
+            // mesmo assim, com os campos de origem nulos.
+            kind: record?.kind ?? null,
+            status: record?.status ?? null,
+            note: record?.note ?? null,
+            userName: record?.user?.name ?? null,
+          };
+        }),
+      );
+    } catch (error) {
+      console.error('[backup] falha ao listar:', error);
       return { data: [] };
     }
+
+    // Registro sem arquivo correspondente: o arquivo foi apagado da pasta
+    // por fora. Sinaliza em vez de esconder, para o admin notar que o
+    // historico e do disco.
+    const orphanRecords = await prisma.backupRecord
+      .findMany({
+        where: { fileName: { notIn: files.map((f) => f.name) } },
+        select: { fileName: true, kind: true, sizeBytes: true, createdAt: true, note: true },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+      })
+      .catch(() => []);
+
+    return {
+      data: files,
+      orphans: orphanRecords.map((r) => ({
+        name: r.fileName,
+        kind: r.kind,
+        size: humanSize(r.sizeBytes),
+        date: r.createdAt.toISOString(),
+        missing: true,
+        note: r.note,
+      })),
+    };
   });
 
   /* ---------------------------------------------------------------- */
@@ -327,12 +437,14 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     const actor = request.currentUser as AuthUser;
     const body = z.object({ fileName: z.string().min(1) }).parse(request.body);
 
-    if (!/^webdist-\d{8}-\d{6}\.db\.gz$/.test(body.fileName)) {
+    // Rejeitar qualquer nome fora do padrao antes de tocar no disco evita
+    // path traversal (ex.: "webdist-20260101-000000.db.gz/../../.env").
+    if (!BACKUP_FILE_PATTERN.test(body.fileName)) {
       return reply.status(400).send({ ok: false, message: 'Nome de arquivo invalido.' });
     }
 
     const dbFile = await resolveDatabaseFile();
-    const backupDir = join(resolve(dirname(dbFile), '../../..'), 'backups');
+    const backupDir = await backupsPath();
     const gzFile = join(backupDir, body.fileName);
 
     try {
@@ -341,19 +453,30 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(404).send({ ok: false, message: 'Arquivo de backup nao encontrado.' });
     }
 
-    // 1. Cria backup de seguranca do banco atual antes de restaurar
-    const safetyFile = join(backupDir, `webdist-pre-restore-${timestamp()}.db.gz`);
+    // 1. Cria backup de seguranca do banco atual antes de restaurar.
+    //    E o unico caminho de volta caso o arquivo restaurado esteja com
+    //    schema incompativel, entao recebe nome proprio e fica listavel.
+    const safetyName = `webdist-pre-restore-${timestamp()}-${randomSuffix()}.db.gz`;
+    const safetyFile = join(backupDir, safetyName);
+    const safetyRaw = `${safetyFile}.tmp`;
     const database = new DatabaseSync(dbFile, { readOnly: true });
     try {
-      database.exec(`VACUUM INTO '${safetyFile.replace(/.gz$/, '').replace(/'/g, "''")}'`);
+      database.exec(`VACUUM INTO '${safetyRaw.replace(/'/g, "''")}'`);
     } finally {
       database.close();
     }
-    await pipeline(createReadStream(safetyFile.replace(/.gz$/, '')), createGzip(), createWriteStream(safetyFile));
-    await rm(safetyFile.replace(/.gz$/, ''), { force: true });
+    await pipeline(createReadStream(safetyRaw), createGzip(), createWriteStream(safetyFile));
+    await rm(safetyRaw, { force: true });
+    await registerBackup({
+      fileName: safetyName,
+      sizeBytes: (await stat(safetyFile)).size,
+      kind: 'PRE_RESTORE',
+      userId: actor.id,
+      note: `Backup automatico gerado antes de restaurar ${body.fileName}`,
+    });
 
     // 2. Descompacta e prepara o restore
-    const tempDb = join(backupDir, `restore-${timestamp()}.db`);
+    const tempDb = join(backupDir, `restore-${timestamp()}-${randomSuffix()}.db`);
     await pipeline(createReadStream(gzFile), createGunzip(), createWriteStream(tempDb));
 
     // Valida se o banco restaurado e consistente
@@ -364,10 +487,20 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       testDb.close();
     }
 
-    // Prepara o restore: move o arquivo restaurado para a pasta de backups como "pending restore"
-    const pendingRestoreFile = join(backupDir, `webdist-pending-restore-${timestamp()}.db`);
+    // Prepara o restore: move o arquivo restaurado para a pasta de backups
+    // como "pending restore". O startup aplica e roda as migrations, porque
+    // um backup antigo pode ter um schema anterior ao atual - restaurar sem
+    // isso deixa o sistema sem tabelas e sem usuario para logar.
+    const pendingName = `webdist-pending-restore-${timestamp()}-${randomSuffix()}.db`;
+    const pendingRestoreFile = join(backupDir, pendingName);
     await rm(pendingRestoreFile, { force: true });
     await rename(tempDb, pendingRestoreFile);
+
+    // O arquivo de origem foi consumido pelo restore: marca como RESTAURADO
+    // para o historico mostrar que ele ja foi usado.
+    await prisma.backupRecord
+      .updateMany({ where: { fileName: body.fileName }, data: { status: 'RESTAURADO' } })
+      .catch(() => undefined);
 
     await recordAudit({
       userId: actor.id,
@@ -381,23 +514,10 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
 
     return reply.send({
       ok: true,
-      message: 'Restore preparado com sucesso. Reinicie a aplicacao (feche e abra novamente) para concluir a restauracao.',
-      pendingFile: pendingRestoreFile.split(/[\\/]/).pop(),
-    });
-
-    await recordAudit({
-      userId: actor.id,
-      userName: actor.username,
-      action: 'BACKUP_RESTORE',
-      entity: 'Backup',
-      entityId: body.fileName,
-      description: `${actor.name} restaurou backup: ${body.fileName}`,
-      request,
-    });
-
-    return reply.send({
-      ok: true,
-      message: 'Backup restaurado com sucesso. Reinicie a aplicacao para recarregar os dados.',
+      message:
+        'Restore preparado com sucesso. Reinicie a aplicacao (feche e abra novamente) para concluir a restauracao.',
+      pendingFile: pendingName,
+      safetyBackup: safetyName,
     });
   });
 
@@ -408,11 +528,11 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     const actor = request.currentUser as AuthUser;
     const { fileName } = z.object({ fileName: z.string().min(1) }).parse(request.params);
 
-    if (!/^webdist-\d{8}-\d{6}\.db\.gz$/.test(fileName)) {
+    if (!BACKUP_FILE_PATTERN.test(fileName)) {
       return reply.status(400).send({ ok: false, message: 'Nome de arquivo invalido.' });
     }
 
-    const backupDir = join(resolve(dirname(await resolveDatabaseFile()), '../../..'), 'backups');
+    const backupDir = await backupsPath();
     const gzFile = join(backupDir, fileName);
 
     try {
@@ -421,7 +541,17 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(404).send({ ok: false, message: 'Arquivo nao encontrado.' });
     }
 
+    // O backup de seguranca do ultimo restore e a saida de emergencia do
+    // sistema; nao ha outro caminho para voltar os dados.
+    if (/^webdist-pre-restore-\d{8}-\d{6}-[0-9a-f]{6}\.db\.gz$/.test(fileName)) {
+      return reply.status(409).send({
+        ok: false,
+        message: 'Este e o backup de seguranca do ultimo restore e nao pode ser excluido.',
+      });
+    }
+
     await rm(gzFile, { force: true });
+    await prisma.backupRecord.delete({ where: { fileName } }).catch(() => undefined);
 
     await recordAudit({
       userId: actor.id,

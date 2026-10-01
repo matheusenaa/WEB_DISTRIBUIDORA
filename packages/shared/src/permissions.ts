@@ -38,6 +38,8 @@ export const PERMISSIONS = [
   // Compras
   'purchases:read',
   'purchases:create',
+  'purchases:update',
+  'purchases:delete',
   'purchases:receive',
 
   // Vendas

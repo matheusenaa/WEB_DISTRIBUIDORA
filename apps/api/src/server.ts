@@ -1,10 +1,12 @@
 import { buildApp } from './app.js';
 import { config } from './env.js';
 import { connectDatabase, disconnectDatabase, prisma } from './lib/prisma.js';
-import { readdir, rm, rename, stat, readFile } from 'node:fs/promises';
+import { applyPendingRestoreIfExists, clearStalePendingRestores } from './lib/restore.js';
+import { assertMovementTypesComplete } from './modules/stock/service.js';
+import { STOCK_MOVEMENT_TYPES } from '@webdist/shared';
+import { readFile } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
 
 /** Resolve o caminho do .sqlite a partir de DATABASE_URL no .env. */
 async function resolveDatabaseFile(): Promise<{ dbFile: string; root: string }> {
@@ -43,56 +45,52 @@ async function resolveDatabaseFile(): Promise<{ dbFile: string; root: string }> 
   return { dbFile, root };
 }
 
-/** Aplica restore pendente se existir arquivo na pasta de backups. */
-async function applyPendingRestoreIfExists(): Promise<void> {
-  try {
-    const { dbFile, root } = await resolveDatabaseFile();
-    const backupDir = join(root, 'backups');
-    
-    // Procura arquivo de restore pendente
-    const files = await readdir(backupDir);
-    const pendingFile = files
-      .filter((name) => /^webdist-pending-restore-\d{8}-\d{6}\.db$/.test(name))
-      .sort()
-      .pop(); // Pega o mais recente
-    
-    if (!pendingFile) {
-      return; // Nenhum restore pendente
-    }
-    
-    const pendingPath = join(backupDir, pendingFile);
-    console.log(`[STARTUP] Restore pendente detectado: ${pendingFile}`);
-    
-    // Valida integridade do arquivo de restore
-    const testDb = new DatabaseSync(pendingPath, { readOnly: true });
-    try {
-      testDb.exec('PRAGMA integrity_check');
-    } finally {
-      testDb.close();
-    }
-    
-    // Remove WAL/SHM do banco atual se existirem
-    await rm(`${dbFile}-wal`, { force: true });
-    await rm(`${dbFile}-shm`, { force: true });
-    
-    // Remove o banco atual
-    await rm(dbFile, { force: true });
-    await rm(`${dbFile}-wal`, { force: true });
-    await rm(`${dbFile}-shm`, { force: true });
-    
-    // Move o arquivo de restore para o lugar do banco principal
-    await rename(pendingPath, dbFile);
-    console.log(`[STARTUP] Restore aplicado com sucesso: ${pendingFile} -> ${dbFile}`);
-    
-  } catch (err) {
-    console.error('[STARTUP] Erro ao aplicar restore pendente:', err);
-    // Nao falha o startup - apenas loga o erro
+/**
+ * Aplica restore pendente e limpa os arquivos que nunca foram aplicados.
+ * A implementacao esta em lib/restore.ts.
+ */
+async function runStartupRestore(): Promise<void> {
+  /*
+   * Um tipo de movimentacao sem sinal definido nao quebra a compilacao:
+   * o TypeScript aceita o enum, e o erro so apareceria como saldo de
+   * estoque errado em producao. Falhar no startup, logo apos o restore,
+   * e o ponto onde o developer ainda esta olhando o terminal.
+   */
+  assertMovementTypesComplete(STOCK_MOVEMENT_TYPES, (type) => {
+    throw new Error(
+      `Tipo de movimentacao "${type}" nao pertence a nenhuma lista de sinal ` +
+        '(INBOUND_MOVEMENT_TYPES, OUTBOUND_MOVEMENT_TYPES, ' +
+        'ADJUSTMENT_MOVEMENT_TYPES ou DOCUMENTAL_MOVEMENT_TYPES).',
+    );
+  });
+
+  const { dbFile, root } = await resolveDatabaseFile();
+
+  const outcome = await applyPendingRestoreIfExists(dbFile, root);
+  if (outcome.applied) {
+    console.log(
+      `[STARTUP] Restore concluido: ${outcome.fileName}` +
+        (outcome.migrations ? ` | ${outcome.migrations}` : ''),
+    );
+  } else if (outcome.error) {
+    console.error(
+      '[STARTUP] O restore NAO foi concluido. O banco atual permanece intacto; ' +
+        'use o backup de seguranca em backups/ para recuperar.',
+    );
+  }
+
+  const removed = await clearStalePendingRestores(dbFile);
+  if (removed > 0) {
+    console.log(`[STARTUP] ${removed} restore(s) pendente(s) antigo(s) removido(s).`);
   }
 }
 
 async function main(): Promise<void> {
-  // 1. Aplica restore pendente ANTES de conectar no banco
-  await applyPendingRestoreIfExists();
+  // 1. Aplica restore pendente ANTES de conectar no banco.
+  //    Inclui o alinhamento de schema: um backup antigo precisa ser
+  //    atualizado para a versao atual do sistema, senao nao ha usuario
+  //    para logar depois do restore.
+  await runStartupRestore();
 
   const app = await buildApp();
 

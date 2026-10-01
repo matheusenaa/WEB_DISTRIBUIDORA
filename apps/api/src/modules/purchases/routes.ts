@@ -294,7 +294,7 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
   /* ---------------------------------------------------------------- */
   /* POST /api/purchases/:id/cancel                                   */
   /* ---------------------------------------------------------------- */
-  app.post('/:id/cancel', { preHandler: [app.requirePermission('purchases:update' as never)] }, async (request) => {
+  app.post('/:id/cancel', { preHandler: [app.requirePermission('purchases:update')] }, async (request) => {
     const actor = request.currentUser as AuthUser;
     const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
     const { reason } = z.object({ reason: z.string().trim().min(3, 'Informe o motivo').max(300) }).parse(request.body);
@@ -333,7 +333,7 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
   /* ---------------------------------------------------------------- */
   /* DELETE /api/purchases/:id - apenas pedidos em aberto             */
   /* ---------------------------------------------------------------- */
-  app.delete('/:id', { preHandler: [app.requirePermission('purchases:create')] }, async (request, reply) => {
+  app.delete('/:id', { preHandler: [app.requirePermission('purchases:delete')] }, async (request, reply) => {
     const actor = request.currentUser as AuthUser;
     const { id } = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
 
