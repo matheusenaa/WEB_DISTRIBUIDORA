@@ -23,8 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Field, Input, SearchInput, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useBarcodeListener } from '@/lib/BarcodeContext';
-import { normalizeBarcode } from '@/lib/barcode';
+import { useBarcodeHandler } from '@/lib/barcode/BarcodeManager';
 import { useDebounced } from '@/lib/useOnline';
 import { dateTime, integer, qty } from '@/lib/format';
 
@@ -40,15 +39,17 @@ export function StockMovementsPage() {
   const [movementOpen, setMovementOpen] = useState(false);
   const [adjustOpen, setAdjustOpen] = useState(false);
 
-  // Global barcode listener for product lookup in stock movements
-  useBarcodeListener('STOCK_LOOKUP', (code) => {
-    if (!movementOpen && !adjustOpen) {
-      const clean = normalizeBarcode(code);
-      setSearch(clean);
+  // Leitura filtra as movimentacoes. Desregistrado enquanto um formulario
+  // esta aberto, para o formulario receber a leitura.
+  useBarcodeHandler(
+    'STOCK_LOOKUP',
+    (result) => {
+      setSearch(result.code);
       setPage(1);
-      toast.info('Buscando movimentacoes do produto', { description: clean });
-    }
-  }, 'stock-movements-search');
+      toast.info('Buscando movimentacoes do produto', { description: result.code });
+    },
+    !movementOpen && !adjustOpen,
+  );
 
   const debouncedSearch = useDebounced(search, 350);
 

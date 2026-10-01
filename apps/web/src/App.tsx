@@ -3,7 +3,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AppLayout } from '@/components/AppLayout';
 import { Spinner } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
-import { BarcodeProvider } from '@/lib/BarcodeContext';
+import { BarcodeProvider } from '@/lib/barcode/BarcodeManager';
 import { LoginPage } from '@/pages/Login';
 import { DashboardPage } from '@/pages/Dashboard';
 import { PdvPage } from '@/pages/Pdv';
@@ -68,26 +68,26 @@ export function App() {
   return (
     <BarcodeProvider>
       <Routes>
-      <Route
-        path="/login"
-        element={isLoading ? <FullScreenLoader /> : user ? <Navigate to="/" replace /> : <LoginPage />}
-      />
-
-      <Route
-        element={
-          <Protected>
-            <AppLayout />
-          </Protected>
-        }
-      >
         <Route
-          path="/"
-          element={
-            <WithPermission permission="dashboard:read">
-              <DashboardPage />
-            </WithPermission>
-          }
+          path="/login"
+          element={isLoading ? <FullScreenLoader /> : user ? <Navigate to="/" replace /> : <LoginPage />}
         />
+
+        <Route
+          element={
+            <Protected>
+              <AppLayout />
+            </Protected>
+          }
+        >
+          <Route
+            path="/"
+            element={
+              <WithPermission permission="dashboard:read">
+                <DashboardPage />
+              </WithPermission>
+            }
+          />
         <Route
           path="/pdv"
           element={
@@ -209,10 +209,6 @@ export function App() {
             </WithPermission>
           }
         />
-        <Route path="/perfil" element={<ProfilePage />} />
-      </Route>
-
-      <Route path="*" element={<NotFoundPage />} />
         <Route
           path="/teste-leitor"
           element={
@@ -221,6 +217,11 @@ export function App() {
             </WithPermission>
           }
         />
+        <Route path="/perfil" element={<ProfilePage />} />
+
+        {/* Rota curinga por ultimo: qualquer caminho desconhecido cai aqui. */}
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
       </Routes>
     </BarcodeProvider>
   );

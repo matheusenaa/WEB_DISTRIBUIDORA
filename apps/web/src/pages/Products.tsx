@@ -20,8 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Field, Input, SearchInput, Select, Textarea } from '@/components/ui/input';
 import { ApiError, api, downloadFile } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useBarcodeListener } from '@/lib/BarcodeContext';
-import { isValidCheckDigit, normalizeBarcode } from '@/lib/barcode';
+import { isValidCheckDigit, normalizeBarcode, useBarcodeHandler } from '@/lib/barcode/BarcodeManager';
 import { useDebounced } from '@/lib/useOnline';
 import { integer, money, percent } from '@/lib/format';
 
@@ -47,15 +46,23 @@ export function ProductsPage() {
   const [deleting, setDeleting] = useState<ProductDTO | null>(null);
   const [importOpen, setImportOpen] = useState(false);
 
-  // Global barcode listener for product search when modal is closed
-  useBarcodeListener('PRODUCT_SEARCH', async (code) => {
-    if (!formOpen) {
-      const clean = normalizeBarcode(code);
-      setSearch(clean);
+  // Leitura na listagem: filtra pelo codigo. Desregistrado enquanto o
+  // formulario esta aberto, para o formulario receber a leitura.
+  useBarcodeHandler(
+    'PRODUCT_SEARCH',
+    (result) => {
+      setSearch(result.code);
       setPage(1);
-      toast.info('Buscando produto por codigo de barras', { description: clean });
-    }
-  }, 'product-list-search');
+      if (result.found) {
+        toast.info('Produto encontrado pelo leitor.', {
+          description: `${result.code} - ${result.product?.name ?? ''}`,
+        });
+      } else {
+        toast.info('Buscando produto por codigo de barras', { description: result.code });
+      }
+    },
+    !formOpen,
+  );
 
   const debouncedSearch = useDebounced(search, 350);
 
@@ -579,32 +586,24 @@ const onBarcodeChange = (value: string) => {
     );
   };
 
-  // Global barcode listener for auto-fill when modal is open
-  useBarcodeListener('PRODUCT_CREATE', (code) => {
-    if (open && !isEdit) {
-      const clean = normalizeBarcode(code);
-      set('barcode', clean);
+  // Leitura com o formulario aberto: preenche o campo. Um unico contexto
+  // cobre criacao e edicao - o `code` ja vem normalizado pelo manager.
+  useBarcodeHandler(
+    'PRODUCT_FORM',
+    (result) => {
+      set('barcode', result.code);
       setBarcodeWarning(
-        clean.length > 0 && !isValidCheckDigit(clean)
+        !isValidCheckDigit(result.code)
           ? 'Atencao: o digito verificador deste codigo parece invalido.'
           : null,
       );
-      toast.info('Codigo de barras preenchido pelo leitor', { description: clean });
-    }
-  }, 'product-form-create');
-
-  useBarcodeListener('PRODUCT_LOOKUP', (code) => {
-    if (open && isEdit) {
-      const clean = normalizeBarcode(code);
-      set('barcode', clean);
-      setBarcodeWarning(
-        clean.length > 0 && !isValidCheckDigit(clean)
-          ? 'Atencao: o digito verificador deste codigo parece invalido.'
-          : null,
+      toast.info(
+        isEdit ? 'Codigo de barras atualizado pelo leitor' : 'Codigo de barras preenchido pelo leitor',
+        { description: result.code },
       );
-      toast.info('Codigo de barras atualizado pelo leitor', { description: clean });
-    }
-  }, 'product-form-edit');
+    },
+    open,
+  );
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();

@@ -1,101 +1,80 @@
-import { Barcode, CheckCircle, Clock, Loader2, Monitor, ScanBarcode, Search, XCircle } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { toast } from 'sonner';
+import { Barcode, CheckCircle, Clock, Gauge, Loader2, Monitor, ScanBarcode, Search, XCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { Badge, Card, CardContent, CardHeader } from '@/components/ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { api } from '@/lib/api';
-import { useBarcode } from '@/lib/BarcodeContext';
-import { normalizeBarcode, isValidCheckDigit } from '@/lib/barcode';
+import {
+  isValidCheckDigit,
+  normalizeBarcode,
+  useBarcodeDiagnostics,
+  useBarcodeHandler,
+  type ScanResult,
+} from '@/lib/barcode/BarcodeManager';
+import { MAX_KEY_GAP_MS, MIN_LENGTH, RESET_TIMEOUT_MS } from '@/lib/barcode/detector';
 import { cn } from '@/lib/cn';
 
-interface FoundProduct {
-  id: number;
-  name: string;
-  barcode: string | null;
-  unit: string;
-  salePrice: number;
-  costPrice: number;
-  stock: number;
-  categoryName?: string;
-  brandName?: string;
+interface HistoryEntry {
+  code: string;
+  timestamp: number;
+  found: boolean;
+  productName?: string;
+  /** Duracao real da leitura, informada pelo detector. */
+  durationMs: number;
+  averageGapMs: number;
+  source: string;
 }
 
 export function BarcodeTestPage() {
-  const { lastScan, simulateScan } = useBarcode();
+  const { lastRead, lastResult, stats, enabled, setEnabled, simulate, reset, context } =
+    useBarcodeDiagnostics();
+
   const [manualCode, setManualCode] = useState('');
-  const [foundProduct, setFoundProduct] = useState<FoundProduct | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [searching, setSearching] = useState(false);
-  const [history, setHistory] = useState<{ code: string; timestamp: number; found: boolean; productName?: string }[]>([]);
-  const [stats, setStats] = useState({ total: 0, found: 0, notFound: 0, avgTime: 0 });
-  const [enabled, setEnabled] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
-  const scanTimesRef = useRef<number[]>([]);
+
+  // Esta tela registra um contexto proprio para "roubar" a leitura de
+  // outras telas: como o manager entrega ao topo da pilha, nenhuma outra
+  // tela reage enquanto o diagnostico estiver aberto.
+  useBarcodeHandler('NONE', (result: ScanResult) => {
+    setHistory((prev) => [
+      {
+        code: result.code,
+        timestamp: result.at,
+        found: result.found,
+        productName: result.product?.name,
+        durationMs: lastRead?.durationMs ?? 0,
+        averageGapMs: lastRead?.averageGapMs ?? 0,
+        source: result.source,
+      },
+      ...prev.slice(0, 49),
+    ]);
+  });
 
   useEffect(() => {
-    if (lastScan && lastScan.action !== 'TEST') {
-      const now = Date.now();
-      scanTimesRef.current.push(now - lastScan.timestamp);
-      if (scanTimesRef.current.length > 50) scanTimesRef.current.shift();
-
-      const found = lastScan.target !== undefined;
-      setHistory((prev) => [
-        { code: lastScan.code, timestamp: lastScan.timestamp, found, productName: lastScan.target },
-        ...prev.slice(0, 49),
-      ]);
-      setStats((s) => ({
-        total: s.total + 1,
-        found: s.found + (found ? 1 : 0),
-        notFound: s.notFound + (found ? 0 : 1),
-        avgTime: scanTimesRef.current.length > 0
-          ? Math.round(scanTimesRef.current.reduce((a, b) => a + b, 0) / scanTimesRef.current.length)
-          : 0,
-      }));
-    }
-  }, [lastScan]);
-
-  const lookup = useCallback(async (rawCode: string) => {
-    const code = normalizeBarcode(rawCode);
-    if (!code) return;
-
-    setSearching(true);
-    const start = performance.now();
-
-    try {
-      const result = await api.get<{ found: boolean; product: FoundProduct | null }>(
-        `/api/products/barcode/${encodeURIComponent(code)}`,
-      );
-
-      const elapsed = Math.round(performance.now() - start);
-      if (result.found && result.product) {
-        setFoundProduct(result.product);
-        toast.success('Produto encontrado', { description: `${result.product.name} (${elapsed}ms)` });
-      } else {
-        setFoundProduct(null);
-        toast.error('Codigo nao encontrado', { description: `Nenhum produto com ${code} (${elapsed}ms)` });
-      }
-    } catch (error) {
-      setFoundProduct(null);
-      toast.error(error instanceof Error ? error.message : 'Falha na busca');
-    } finally {
-      setSearching(false);
-    }
-  }, []);
+    if (searching) return;
+    if (lastResult) setSearching(false);
+  }, [lastResult, searching]);
 
   const handleManualSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const code = normalizeBarcode(manualCode);
     if (!code) return;
-    lookup(code);
-    simulateScan(code, 'TEST');
+    setSearching(true);
+    simulate(code);
     setManualCode('');
     inputRef.current?.focus();
   };
 
   const handleQuickScan = (code: string) => {
     setManualCode(code);
-    lookup(code);
-    simulateScan(code, 'TEST');
+    setSearching(true);
+    simulate(code);
+  };
+
+  const clearHistory = () => {
+    setHistory([]);
+    reset();
   };
 
   return (
@@ -110,24 +89,19 @@ export function BarcodeTestPage() {
             Ferramenta de diagnostico para validar a leitura de codigos de barras via leitor USB (HID/teclado).
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge tone={enabled ? 'success' : 'muted'} className="gap-1">
-            {enabled ? <CheckCircle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
-            {enabled ? 'Captura ativa' : 'Captura pausada'}
-          </Badge>
-          <Button variant="outline" onClick={() => setEnabled((e) => !e)}>
-            {enabled ? 'Pausar' : 'Ativar'}
-          </Button>
-          <Button variant="outline" onClick={() => {
-            setHistory([]);
-            setStats({ total: 0, found: 0, notFound: 0, avgTime: 0 });
-            scanTimesRef.current = [];
-            toast.info('Historico limpo');
-          }}>
-            <Loader2 className="h-4 w-4" aria-hidden />
-            Limpar historico
-          </Button>
-        </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge tone={enabled ? 'success' : 'muted'} className="gap-1">
+              {enabled ? <CheckCircle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+              {enabled ? 'Captura ativa' : 'Captura pausada'}
+            </Badge>
+            <Button variant="outline" onClick={() => setEnabled(!enabled)}>
+              {enabled ? 'Pausar' : 'Ativar'}
+            </Button>
+            <Button variant="outline" onClick={clearHistory}>
+              <Loader2 className="h-4 w-4" aria-hidden />
+              Limpar historico
+            </Button>
+          </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_380px]">
@@ -176,7 +150,7 @@ export function BarcodeTestPage() {
             </CardContent>
           </Card>
 
-          {foundProduct && (
+          {lastResult?.product && (
             <Card className="border-success/30">
               <CardHeader
                 title="Produto encontrado"
@@ -191,36 +165,40 @@ export function BarcodeTestPage() {
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div>
                     <p className="text-xs text-muted-foreground">Nome</p>
-                    <p className="font-semibold text-lg">{foundProduct.name}</p>
+                    <p className="font-semibold text-lg">{lastResult.product.name}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Preco de venda</p>
-                    <p className="font-bold text-lg text-success">{Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(foundProduct.salePrice / 100)}</p>
+                    <p className="font-bold text-lg text-success">
+                      {formatBRL(lastResult.product.salePrice)}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Custo</p>
-                    <p className="font-bold text-lg">{Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(foundProduct.costPrice / 100)}</p>
+                    <p className="font-bold text-lg">{formatBRL(lastResult.product.costPrice)}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Estoque</p>
-                    <p className="font-bold text-lg tabular-nums">{foundProduct.stock} {foundProduct.unit}</p>
+                    <p className="font-bold text-lg tabular-nums">
+                      {lastResult.product.stock} {lastResult.product.unit}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Codigo de barras</p>
-                    <p className="font-mono text-sm">{foundProduct.barcode ?? 'N/A'}</p>
+                    <p className="font-mono text-sm">{lastResult.product.barcode ?? 'N/A'}</p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Categoria</p>
-                    <p className="text-sm">{foundProduct.categoryName ?? 'Sem categoria'}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Marca</p>
-                    <p className="text-sm">{foundProduct.brandName ?? 'Sem marca'}</p>
+                    <p className="text-xs text-muted-foreground">Localizacao</p>
+                    <p className="text-sm">{lastResult.product.location ?? 'Nao informada'}</p>
                   </div>
                   <div className="sm:col-span-2">
-                    <p className="text-xs text-muted-foreground">Validacao do digito verificador (EAN-13/UPC)</p>
-                    <Badge tone={isValidCheckDigit(foundProduct.barcode ?? '') ? 'success' : 'warning'}>
-                      {isValidCheckDigit(foundProduct.barcode ?? '') ? 'Digito valido' : 'Digito invalido ou codigo nao numerico'}
+                    <p className="text-xs text-muted-foreground">
+                      Validacao do digito verificador (EAN-13/UPC)
+                    </p>
+                    <Badge tone={isValidCheckDigit(lastResult.product.barcode ?? '') ? 'success' : 'warning'}>
+                      {isValidCheckDigit(lastResult.product.barcode ?? '')
+                        ? 'Digito valido'
+                        : 'Digito invalido ou codigo nao numerico'}
                     </Badge>
                   </div>
                 </div>
@@ -228,7 +206,7 @@ export function BarcodeTestPage() {
             </Card>
           )}
 
-          {!foundProduct && !searching && manualCode.length > 0 && (
+          {lastResult && !lastResult.product && (
             <Card className="border-destructive/30">
               <CardHeader
                 title="Produto nao encontrado"
@@ -241,9 +219,12 @@ export function BarcodeTestPage() {
               />
               <CardContent className="space-y-3">
                 <p className="text-muted-foreground">
-                  O codigo <strong className="font-mono">{normalizeBarcode(manualCode)}</strong> nao esta cadastrado.
+                  O codigo <strong className="font-mono">{lastResult.code}</strong> nao esta cadastrado.
                 </p>
-                <Button variant="outline" onClick={() => toast.info('Redirecionaria para cadastro com codigo preenchido')}>
+                <Button
+                  variant="outline"
+                  onClick={() => window.open(`/produtos?barcode=${encodeURIComponent(lastResult.code)}`, '_blank')}
+                >
                   Cadastrar produto com este codigo
                 </Button>
               </CardContent>
@@ -251,7 +232,14 @@ export function BarcodeTestPage() {
           )}
 
           <Card>
-            <CardHeader title="Historico de leituras (ultimas 50)" />
+            <CardHeader
+              title="Historico de leituras (ultimas 50)"
+              action={
+                <Badge tone={lastRead?.checkDigit === 'SUSPEITO' ? 'warning' : 'muted'}>
+                  Digito: {lastRead ? (lastRead.checkDigit === 'OK' ? 'valido' : 'suspeito') : '-'}
+                </Badge>
+              }
+            />
             <CardContent className="p-0">
               {history.length === 0 ? (
                 <div className="p-8 text-center text-muted-foreground">
@@ -267,12 +255,13 @@ export function BarcodeTestPage() {
                         <th className="w-28">Hora</th>
                         <th>Codigo</th>
                         <th className="w-36">Status</th>
-                        <th className="w-24">Tempo</th>
+                        <th className="w-24">Origem</th>
+                        <th className="w-28">Teclas</th>
                       </tr>
                     </thead>
                     <tbody>
                       {history.map((item, idx) => (
-                        <tr key={idx} className={item.found ? '' : 'bg-destructive/5'}>
+                        <tr key={`${item.timestamp}-${idx}`} className={item.found ? '' : 'bg-destructive/5'}>
                           <td className="text-xs font-mono">{new Date(item.timestamp).toLocaleTimeString('pt-BR')}</td>
                           <td className="font-mono text-sm">{item.code}</td>
                           <td>
@@ -290,8 +279,16 @@ export function BarcodeTestPage() {
                               )}
                             </Badge>
                           </td>
-                          <td className="text-xs text-muted-foreground font-mono">
-                            ~{Math.max(0, Math.round(100 - idx * 2))}ms
+                          <td className="text-xs font-mono text-muted-foreground">
+                            {item.averageGapMs > 0 ? `${item.averageGapMs}ms/tecla` : '-'}
+                          </td>
+                          <td>
+                            <Badge tone={item.source === 'SCANNER' ? 'success' : 'muted'}>
+                              {SOURCE_LABELS[item.source] ?? item.source}
+                            </Badge>
+                          </td>
+                          <td className="text-xs text-muted-foreground tabular-nums">
+                            {item.durationMs > 0 ? `${item.durationMs}ms` : '-'}
                           </td>
                         </tr>
                       ))}
@@ -310,7 +307,22 @@ export function BarcodeTestPage() {
               <StatCard label="Total de leituras" value={stats.total} icon={<Monitor className="h-4 w-4" />} />
               <StatCard label="Encontrados" value={stats.found} tone="success" icon={<CheckCircle className="h-4 w-4" />} />
               <StatCard label="Nao encontrados" value={stats.notFound} tone="destructive" icon={<XCircle className="h-4 w-4" />} />
-              <StatCard label="Tempo medio" value={`${stats.avgTime}ms`} icon={<Clock className="h-4 w-4" />} />
+              <StatCard
+                label="Contexto ativo"
+                value={context === 'NONE' ? 'Diagnostico' : context}
+                icon={<ScanBarcode className="h-4 w-4" />}
+              />
+              <StatCard
+                label="Ultima leitura"
+                value={lastRead ? `${lastRead.averageGapMs || 0}ms/tecla` : '-'}
+                icon={<Gauge className="h-4 w-4" />}
+              />
+              <StatCard
+                label="Digito verificador"
+                value={lastRead ? (lastRead.checkDigit === 'OK' ? 'Valido' : 'Suspeito') : '-'}
+                tone={lastRead?.checkDigit === 'SUSPEITO' ? 'destructive' : 'default'}
+                icon={<Clock className="h-4 w-4" />}
+              />
             </CardContent>
           </Card>
 
@@ -324,18 +336,18 @@ export function BarcodeTestPage() {
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground">Caracteres minimos</p>
-                  <p className="font-mono">4</p>
+                  <p className="font-mono">{MIN_LENGTH}</p>
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground">Gap maximo entre teclas</p>
-                  <p className="font-mono">45ms</p>
+                  <p className="font-mono">{MAX_KEY_GAP_MS}ms</p>
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground">Timeout de reset</p>
-                  <p className="font-mono">220ms</p>
+                  <p className="font-mono">{RESET_TIMEOUT_MS}ms</p>
                 </div>
               </div>
-<div className="rounded-md border border-border bg-muted p-3">
+              <div className="rounded-md border border-border bg-muted p-3">
                 <p className="text-xs text-muted-foreground mb-2">
                   <strong>Como funciona:</strong> O leitor USB atua como teclado. O sistema detecta a velocidade
                   da digitacao (intervalo {'<'}{'45ms'} entre caracteres) e o Enter final para identificar uma leitura.
@@ -383,6 +395,16 @@ export function BarcodeTestPage() {
       </div>
     </div>
   );
+}
+
+const SOURCE_LABELS: Record<string, string> = {
+  SCANNER: 'Leitor',
+  MANUAL: 'Manual',
+  SIMULADO: 'Simulado',
+};
+
+function formatBRL(cents: number): string {
+  return Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cents / 100);
 }
 
 function QuickScanButton({ code, label, onClick }: { code: string; label: string; onClick: (code: string) => void }) {

@@ -20,8 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Field, Input, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { useBarcodeListener } from '@/lib/BarcodeContext';
-import { normalizeBarcode, useBarcodeScanner } from '@/lib/barcode';
+import { normalizeBarcode, useBarcodeHandler, type ScanResult } from '@/lib/barcode/BarcodeManager';
 import { cn } from '@/lib/cn';
 import { money, qty } from '@/lib/format';
 
@@ -171,44 +170,58 @@ export function PdvPage() {
 
   /* ---------------- Busca ---------------- */
 
+  /**
+   * Adiciona ao carrinho. Aceita o produto parcial que o PDV usa, que e
+   * um subconjunto do DTO completo devolvido pela API.
+   */
+  const addFoundProduct = useCallback(
+    (code: string, product: FoundProduct | null) => {
+      if (!product) {
+        toast.error('Codigo de barras nao encontrado', {
+          description: `Nenhum produto com o codigo ${code}`,
+        });
+        return;
+      }
+      if (product.stock <= 0) {
+        toast.error(`${product.name} esta sem estoque.`);
+        return;
+      }
+      addLine(product);
+      toast.success(product.name, { description: 'Item adicionado ao carrinho' });
+    },
+    [addLine],
+  );
+
+  /** Leitor global: o manager ja consultou o produto, entao aqui so decidimos o que fazer. */
+  const handleScanResult = useCallback(
+    (result: ScanResult) => {
+      addFoundProduct(result.code, result.product);
+    },
+    [addFoundProduct],
+  );
+
+  /** Busca por codigo, para digitacao manual e acoes de teclado. */
   const lookup = useCallback(
     async (rawCode: string) => {
       const code = normalizeBarcode(rawCode);
       if (!code) return;
       try {
-        const result = await api.get<{ found: boolean; product: FoundProduct | null }>(
+        const response = await api.get<{ found: boolean; product: FoundProduct | null }>(
           `/api/products/barcode/${encodeURIComponent(code)}`,
         );
-        if (result.found && result.product) {
-          if (result.product.stock <= 0) {
-            toast.error(`${result.product.name} esta sem estoque.`);
-            return;
-          }
-          addLine(result.product);
-          toast.success(result.product.name, { description: 'Item adicionado ao carrinho' });
-        } else {
-          toast.error('Codigo de barras nao encontrado', {
-            description: `Nenhum produto com o codigo ${code}`,
-          });
-        }
+        addFoundProduct(code, response.product);
       } catch (error) {
         toast.error(
           error instanceof ApiError ? error.message : 'Falha ao consultar o codigo de barras.',
         );
       }
     },
-    [addLine],
+    [addFoundProduct],
   );
 
-// Leitor de codigo de barras global (funciona sem clicar em nenhum campo).
-  useBarcodeScanner({ onScan: (code) => void lookup(code) });
-
-  // Global barcode listener for PDV - works everywhere in the app
-  useBarcodeListener('PDV_ADD', (code) => {
-    if (!paymentOpen && !cashOpen) {
-      void lookup(code);
-    }
-  }, 'pdv-main');
+  // Desregistrado durante o pagamento e o caixa para nao beepar produto
+  // com o cupom aberto.
+  useBarcodeHandler('PDV', handleScanResult, !paymentOpen && !cashOpen);
 
   useEffect(() => {
     const term = searchTerm.trim();
