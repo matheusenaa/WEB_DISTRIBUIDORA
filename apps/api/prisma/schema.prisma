@@ -41,6 +41,8 @@ model User {
   cashMovements   CashMovement[]
   auditLogs       AuditLog[]
   refreshTokens   RefreshToken[]
+  purchaseOrders  PurchaseOrder[]
+  backups         BackupRecord[]
 
   @@index([role])
   @@index([status])
@@ -104,10 +106,20 @@ model Supplier {
   phone     String?
   address   String?
   active    Boolean  @default(true)
+  // --- Dados de reposicao (alimentam a sugestao de recompra) ---
+  /// Prazo medio de entrega em dias, do pedido ate o recebimento.
+  leadTimeDays Int   @default(0)
+  /// Quantidade minima que o fornecedor aceita por pedido (0 = sem minimo).
+  minOrderQuantity Int @default(0)
+  /// Ultimo preco unitario pago e data da ultima compra.
+  /// Mantidos desnormalizados para a lista de recompra nao exigir JOIN.
+  lastPurchasePrice Int?
+  lastPurchaseAt    DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  products Product[]
+  products       Product[]
+  purchaseOrders PurchaseOrder[]
 
   @@index([name])
   @@index([active])
@@ -153,6 +165,12 @@ model Product {
   unit             String  @default("UN")
   status           String  @default("ATIVO") // ATIVO | INATIVO
   saleObservation  String?
+  /// Endereco no deposito: corredor/prateleira/caixa. Ajuda o Picking.
+  location         String?
+  /// Data da ultima venda concluida. Desnormalizada de proposito: a analise
+  /// de "produtos parados" roda sobre toda a base e um JOIN com sale_items
+  /// seria caro. Mantida pela transacao de venda.
+  lastSaleAt       DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -161,6 +179,7 @@ model Product {
   supplier       Supplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull)
   stockMovements StockMovement[]
   saleItems      SaleItem[]
+  purchaseItems  PurchaseItem[]
 
   @@index([name])
   @@index([barcode])
@@ -168,6 +187,12 @@ model Product {
   @@index([categoryId])
   @@index([supplierId])
   @@index([stock])
+  @@index([location])
+  /// Indice parcial equivalente para os filtros de alerta de estoque, que
+  /// sempre combinam `status = ATIVO` com comparacao de saldo.
+  @@index([status, minStock, stock])
+  /// Analise de produtos parados: filtra por status e ordena por ultima venda.
+  @@index([status, lastSaleAt])
   @@map("products")
 }
 
@@ -179,7 +204,7 @@ model Product {
 
 model StockMovement {
   id             Int      @id @default(autoincrement())
-  type           String // ENTRADA | SAIDA | AJUSTE | DEVOLUCAO | PERDA | TRANSFERENCIA_SAIDA | TRANSFERENCIA_ENTRADA
+  type           String // ENTRADA | SAIDA | VENDA | CANCELAMENTO | AJUSTE | DEVOLUCAO | PERDA | TRANSFERENCIA_SAIDA | TRANSFERENCIA_ENTRADA
   productId      Int
   quantity       Int // sempre positivo; o `type` define o sinal
   previousStock  Int
@@ -189,17 +214,72 @@ model StockMovement {
   unitCost       Int?
   userId         Int
   saleId         Int?
+  purchaseOrderId Int?
   createdAt      DateTime @default(now())
 
-  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
-  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
-  sale    Sale?   @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  product       Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  user          User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  sale          Sale?          @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  purchaseOrder PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id], onDelete: SetNull)
 
   @@index([productId, createdAt])
   @@index([type])
   @@index([createdAt])
   @@index([saleId])
+  @@index([purchaseOrderId])
   @@map("stock_movements")
+}
+
+// ---------------------------------------------------------------------
+// COMPRAS
+// ---------------------------------------------------------------------
+// Registro do que foi pedido ao fornecedor. Alimenta a sugestao de
+// recompra (prazo medio, ultimo preco, data da ultima compra) e
+// permite Receipt Order transformar o pedido em movimentacoes de estoque.
+
+model PurchaseOrder {
+  id             Int       @id @default(autoincrement())
+  number         Int       @unique
+  supplierId     Int
+  userId         Int
+  status         String    @default("ABERTO") // ABERTO | RECEBIDO | CANCELADO
+  /// Numero da nota fiscal do fornecedor (documento do XML/DANFE).
+  documentNumber String?
+  orderedAt      DateTime  @default(now())
+  receivedAt     DateTime?
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  supplier Supplier        @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  items    PurchaseItem[]
+  movements StockMovement[]
+
+  @@index([supplierId, orderedAt])
+  @@index([status])
+  @@index([orderedAt])
+  @@map("purchase_orders")
+}
+
+model PurchaseItem {
+  id              Int   @id @default(autoincrement())
+  purchaseOrderId Int
+  productId       Int
+  productName     String // snapshot: sobrevive a renomeacao do produto
+  unit            String
+  quantity        Int
+  /// Preco unitario pago, em centavos (_snapshot do momento da compra).
+  unitCost        Int
+  receivedQuantity Int?
+  createdAt       DateTime @default(now())
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product       Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@map("purchase_items")
 }
 
 // ---------------------------------------------------------------------
@@ -363,4 +443,29 @@ model SystemSetting {
   updatedAt DateTime @updatedAt
 
   @@map("system_settings")
+}
+
+// ---------------------------------------------------------------------
+// BACKUPS
+// ---------------------------------------------------------------------
+// Registro dos backups gerados. O arquivo .db.gz vive no disco; esta
+// tabela guarda o historico para a tela de Configuracoes e para a
+// retencao automatica, sem precisar varrer a pasta a cada listagem.
+
+model BackupRecord {
+  id         Int      @id @default(autoincrement())
+  fileName   String   @unique
+  sizeBytes  Int      @default(0)
+  kind       String   @default("MANUAL") // MANUAL | AUTOMATICO | PRE_RESTORE
+  status     String   @default("VALIDO") // VALIDO | INVALIDO | RESTAURADO
+  userId     Int?
+  note       String?
+  checksum   String?
+  createdAt  DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([status])
+  @@map("backups")
 }

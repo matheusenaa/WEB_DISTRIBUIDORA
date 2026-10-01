@@ -90,11 +90,43 @@ export function marginFromPrice(priceCents: number, costCents: number): number {
   return ((priceCents - costCents) / priceCents) * 100;
 }
 
+/**
+ * MARKUP sobre o custo (percentual investido -> percentual acrescimo).
+ *
+ * Custo 5000, preco 7000 => markup 40%.
+ *
+ * NAO CONFUNDIR com margem: markup e relativo ao CUSTO, margem e relativa
+ * ao PRECO DE VENDA. Para o mesmo par (5000 / 7000) os valores sao
+ * 40% e 28,57%. Em qualquer discussao comercial os dois numeros precisam
+ * estar explicitamente rotulados, senao o vendedor negocia errado.
+ */
+export function markupFromPrice(priceCents: number, costCents: number): number {
+  if (costCents <= 0) return 0;
+  return ((priceCents - costCents) / costCents) * 100;
+}
+
 /** Preco necessario para atingir a margem desejada. */
 export function priceFromMargin(costCents: number, marginPercent: number): number {
   if (marginPercent >= 100) return 0;
   if (marginPercent <= -100) return 0;
   return Math.round(costCents / (1 - marginPercent / 100));
+}
+
+/**
+ * Conversao inversa: qual margem corresponde a um markup informado.
+ * priceFromMarkup e marginFromPrice sao equivalentes por estaformula.
+ */
+export function marginFromMarkup(markupPercent: number): number {
+  const divisor = 1 + markupPercent / 100;
+  if (divisor <= 0) return 0;
+  return (markupPercent / 100 / divisor) * 100;
+}
+
+/** Markup necessario para atingir a margem desejada. */
+export function markupFromMargin(marginPercent: number): number {
+  if (marginPercent >= 100) return Number.POSITIVE_INFINITY;
+  if (marginPercent <= -100) return 0;
+  return (marginPercent / (100 - marginPercent)) * 100;
 }
 
 /** Lucro estimado em centavos. */

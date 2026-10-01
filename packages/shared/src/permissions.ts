@@ -35,6 +35,11 @@ export const PERMISSIONS = [
   'stock:adjust',
   'stock:receive',
 
+  // Compras
+  'purchases:read',
+  'purchases:create',
+  'purchases:receive',
+
   // Vendas
   'sales:read',
   'sales:read-all',

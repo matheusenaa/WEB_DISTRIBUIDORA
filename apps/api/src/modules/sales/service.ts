@@ -238,9 +238,12 @@ export async function createSale(params: CreateSaleParams): Promise<CreateSaleRe
       });
 
       // Baixa de estoque: uma movimentacao por item, sempre registrada.
+      // `VENDA` e um tipo proprio para que o relatorio de estoque distinga
+      // a saida comercial de uma perda, de um ajuste ou de uma devolucao.
+      const soldAt = new Date();
       for (const line of lines) {
         await applyStockMovement(tx, {
-          type: 'SAIDA',
+          type: 'VENDA',
           productId: line.productId,
           quantity: line.quantity,
           reason: `Venda #${number}`,
@@ -248,6 +251,12 @@ export async function createSale(params: CreateSaleParams): Promise<CreateSaleRe
           userId: actor.id,
           saleId: sale.id,
           allowNegative: config.ALLOW_NEGATIVE_STOCK,
+        });
+        // `lastSaleAt` desnormalizado alimenta a analise de produtos
+        // parados sem exigir JOIN com sale_items.
+        await tx.product.update({
+          where: { id: line.productId },
+          data: { lastSaleAt: soldAt },
         });
       }
 

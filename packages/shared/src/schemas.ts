@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   PRODUCT_STATUSES,
   PRODUCT_UNITS,
+  PURCHASE_STATUSES,
   SALE_PAYMENT_METHODS,
   STOCK_MOVEMENT_TYPES,
 } from './enums.js';
@@ -160,6 +161,10 @@ export const supplierSchema = z.object({
   phone: phoneSchema,
   address: z.string().trim().max(300).optional().or(z.literal('')),
   active: z.boolean().default(true),
+  /** Prazo medio de entrega em dias. Alimenta a sugestao de recompra. */
+  leadTimeDays: z.coerce.number().int().min(0, 'Prazo nao pode ser negativo').max(365).default(0),
+  /** Quantidade minima aceita por pedido (0 = sem minimo). */
+  minOrderQuantity: z.coerce.number().int().min(0, 'Quantidade nao pode ser negativa').max(1_000_000).default(0),
 });
 export type SupplierInput = z.infer<typeof supplierSchema>;
 
@@ -194,6 +199,7 @@ export const productCreateSchema = z
     unit: z.enum(PRODUCT_UNITS).default('UN'),
     status: z.enum(PRODUCT_STATUSES).default('ATIVO'),
     saleObservation: z.string().trim().max(300).optional().or(z.literal('')),
+    location: z.string().trim().max(80).optional().or(z.literal('')),
   })
   .refine((v) => !v.barcode || /^[0-9A-Za-z\-_.]+$/.test(v.barcode), {
     message: 'Codigo de barras invalido',
@@ -221,6 +227,7 @@ export const productUpdateSchema = z
     unit: z.enum(PRODUCT_UNITS).optional(),
     status: z.enum(PRODUCT_STATUSES).optional(),
     saleObservation: z.string().trim().max(300).optional().or(z.literal('')),
+    location: z.string().trim().max(80).optional().or(z.literal('')),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), {
     message: 'Informe ao menos um campo para atualizar',
@@ -263,6 +270,61 @@ export const stockQuerySchema = paginationSchema.extend({
   userId: z.coerce.number().int().positive().optional(),
 });
 export type StockQuery = z.infer<typeof stockQuerySchema>;
+
+/* ------------------------------------------------------------------ */
+/* Compras                                                             */
+/* ------------------------------------------------------------------ */
+
+export const purchaseItemSchema = z.object({
+  productId: z.coerce.number().int().positive('Produto invalido'),
+  quantity: z.coerce.number().int().positive('Quantidade deve ser maior que zero'),
+  unitCost: moneyInputSchema,
+});
+export type PurchaseItemInput = z.infer<typeof purchaseItemSchema>;
+
+export const purchaseCreateSchema = z
+  .object({
+    supplierId: z.coerce.number().int().positive('Selecione o fornecedor'),
+    items: z.array(purchaseItemSchema).min(1, 'Adicione ao menos um item'),
+    documentNumber: z.string().trim().max(60).optional().or(z.literal('')),
+    notes: z.string().trim().max(600).optional().or(z.literal('')),
+    /** Quando true, o recebimento (baixa de estoque) ocorre na criacao. */
+    receiveNow: z.boolean().default(false),
+  })
+  .refine(
+    (v) => new Set(v.items.map((i) => i.productId)).size === v.items.length,
+    { message: 'O mesmo produto nao pode aparecer duas vezes no pedido', path: ['items'] },
+  );
+export type PurchaseCreateInput = z.input<typeof purchaseCreateSchema>;
+
+export const purchaseReceiveSchema = z
+  .object({
+    /** Quantidade efetivamente recebida por item. Ausente = quantidade pedida. */
+    items: z
+      .array(
+        z.object({
+          productId: z.coerce.number().int().positive(),
+          receivedQuantity: z.coerce.number().int().min(0, 'Quantidade nao pode ser negativa'),
+        }),
+      )
+      .optional(),
+    documentNumber: z.string().trim().max(60).optional().or(z.literal('')),
+    notes: z.string().trim().max(600).optional().or(z.literal('')),
+  })
+  .refine((v) => v.items === undefined || v.items.length > 0, {
+    message: 'Informe ao menos um item para receber',
+    path: ['items'],
+  });
+export type PurchaseReceiveInput = z.input<typeof purchaseReceiveSchema>;
+
+export const purchaseQuerySchema = paginationSchema.extend({
+  supplierId: z.coerce.number().int().positive().optional(),
+  status: z.enum(PURCHASE_STATUSES).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+  search: z.string().trim().max(120).optional(),
+});
+export type PurchaseQuery = z.infer<typeof purchaseQuerySchema>;
 
 /* ------------------------------------------------------------------ */
 /* Vendas / PDV                                                        */

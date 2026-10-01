@@ -7,6 +7,8 @@ export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
 export const STOCK_MOVEMENT_TYPES = [
   'ENTRADA',
   'SAIDA',
+  'VENDA',
+  'CANCELAMENTO',
   'AJUSTE',
   'DEVOLUCAO',
   'PERDA',
@@ -18,12 +20,33 @@ export type StockMovementType = (typeof STOCK_MOVEMENT_TYPES)[number];
 export const STOCK_MOVEMENT_LABELS: Record<StockMovementType, string> = {
   ENTRADA: 'Entrada',
   SAIDA: 'Saida',
+  VENDA: 'Venda',
+  CANCELAMENTO: 'Cancelamento',
   AJUSTE: 'Ajuste',
   DEVOLUCAO: 'Devolucao',
   PERDA: 'Perda',
   TRANSFERENCIA_SAIDA: 'Transferencia (saida)',
   TRANSFERENCIA_ENTRADA: 'Transferencia (entrada)',
 };
+
+/** Tipos de movimentacao que aumentam o saldo. */
+export const INBOUND_MOVEMENT_TYPES = [
+  'ENTRADA',
+  'DEVOLUCAO',
+  'TRANSFERENCIA_ENTRADA',
+] as const satisfies readonly StockMovementType[];
+
+/** Tipos de movimentacao que reduzem o saldo. */
+export const OUTBOUND_MOVEMENT_TYPES = [
+  'SAIDA',
+  'VENDA',
+  'CANCELAMENTO',
+  'PERDA',
+  'TRANSFERENCIA_SAIDA',
+] as const satisfies readonly StockMovementType[];
+
+/** Tipos em que o sinal e definido pelo estoque final desejado. */
+export const ADJUSTMENT_MOVEMENT_TYPES = ['AJUSTE'] as const satisfies readonly StockMovementType[];
 
 export const SALE_STATUSES = ['CONCLUIDA', 'CANCELADA'] as const;
 export type SaleStatus = (typeof SALE_STATUSES)[number];
@@ -125,3 +148,46 @@ export const STOCK_ALERT_LABELS: Record<StockAlertLevel, string> = {
   CRITICO: 'Estoque critico',
   BAIXO: 'Estoque baixo',
 };
+
+/* ---------------- Compras ---------------- */
+
+export const PURCHASE_STATUSES = ['ABERTO', 'RECEBIDO', 'CANCELADO'] as const;
+export type PurchaseStatus = (typeof PURCHASE_STATUSES)[number];
+
+export const PURCHASE_STATUS_LABELS: Record<PurchaseStatus, string> = {
+  ABERTO: 'Aberto',
+  RECEBIDO: 'Recebido',
+  CANCELADO: 'Cancelado',
+};
+
+/* ---------------- Backups ---------------- */
+
+export const BACKUP_KINDS = ['MANUAL', 'AUTOMATICO', 'PRE_RESTORE'] as const;
+export type BackupKind = (typeof BACKUP_KINDS)[number];
+
+export const BACKUP_STATUSES = ['VALIDO', 'INVALIDO', 'RESTAURADO'] as const;
+export type BackupStatus = (typeof BACKUP_STATUSES)[number];
+
+/* ---------------- Analises ---------------- */
+
+/** Motivo pelo qual um produto entrou na lista de reposicao. */
+export type ReplenishmentReason = 'SEM_ESTOQUE' | 'ABAIXO_DO_MINIMO' | 'ESTOQUE_NEGATIVO';
+
+/** Confianca da analise, derivada da quantidade de dados disponiveis. */
+export type ConfidenceLevel = 'ALTA' | 'MEDIA' | 'BAIXA' | 'SEM_DADOS';
+
+export const CONFIDENCE_LABELS: Record<ConfidenceLevel, string> = {
+  ALTA: 'Alta confianca',
+  MEDIA: 'Confianca media',
+  BAIXA: 'Baixa confianca',
+  SEM_DADOS: 'Sem dados suficientes',
+};
+
+/** Granularidade da analise de sazonalidade. */
+export const SEASONALITY_PERIODS = ['MENSAL', 'TRIMESTRAL', 'ANUAL'] as const;
+export type SeasonalityPeriod = (typeof SEASONALITY_PERIODS)[number];
+
+/* ---------------- Impressao ---------------- */
+
+export const RECEIPT_WIDTHS = [58, 80] as const;
+export type ReceiptWidth = (typeof RECEIPT_WIDTHS)[number];

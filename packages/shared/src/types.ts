@@ -1,7 +1,13 @@
 import type { Permission, Role } from './permissions.js';
 import type {
+  BackupKind,
+  BackupStatus,
+  ConfidenceLevel,
+  PurchaseStatus,
+  ReplenishmentReason,
   SalePaymentMethod,
   SaleStatus,
+  SeasonalityPeriod,
   StockAlertLevel,
   StockMovementType,
 } from './enums.js';
@@ -84,6 +90,12 @@ export interface SupplierDTO {
   address: string | null;
   active: boolean;
   productCount?: number;
+  /** Prazo medio de entrega em dias (0 = nao informado). */
+  leadTimeDays?: number;
+  /** Quantidade minima aceita por pedido (0 = sem minimo). */
+  minOrderQuantity?: number;
+  lastPurchasePrice?: number | null;
+  lastPurchaseAt?: string | null;
   createdAt: string;
 }
 
@@ -121,6 +133,10 @@ export interface ProductDTO {
   marginPercent: number;
   profitCents: number;
   alertLevel: StockAlertLevel | null;
+  /** Endereco no deposito (corredor/prateleira/caixa). */
+  location: string | null;
+  /** Ultima venda concluida; null se nunca vendeu. */
+  lastSaleAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -313,4 +329,203 @@ export interface AuditLogDTO {
   ip: string | null;
   userAgent: string | null;
   createdAt: string;
+}
+
+/* ---------------- Compras ---------------- */
+
+export interface PurchaseItemDTO {
+  id: number;
+  productId: number;
+  productName: string;
+  productUnit: string;
+  barcode: string | null;
+  quantity: number;
+  unitCost: number;
+  receivedQuantity: number | null;
+  subtotal: number;
+}
+
+export interface PurchaseOrderDTO {
+  id: number;
+  number: number;
+  supplierId: number;
+  supplierName: string;
+  userId: number;
+  userName: string;
+  status: PurchaseStatus;
+  documentNumber: string | null;
+  orderedAt: string;
+  receivedAt: string | null;
+  notes: string | null;
+  itemsCount: number;
+  totalQuantity: number;
+  totalCents: number;
+  createdAt: string;
+  updatedAt: string;
+  items?: PurchaseItemDTO[];
+}
+
+export interface PurchaseCreateItemInput {
+  productId: number;
+  quantity: number;
+  unitCost: number;
+}
+
+/* ---------------- Backups ---------------- */
+
+export interface BackupRecordDTO {
+  fileName: string;
+  sizeBytes: number;
+  sizeLabel: string;
+  kind: BackupKind;
+  status: BackupStatus;
+  userName: string | null;
+  note: string | null;
+  createdAt: string;
+  /** Presente quando o arquivo esta em disco e pode ser restaurado. */
+  available: boolean;
+}
+
+export interface BackupCreateResult {
+  ok: true;
+  fileName: string;
+  sizeBytes: number;
+  sizeLabel: string;
+  path: string;
+  durationMs: number;
+}
+
+export interface RestorePrepareResult {
+  ok: true;
+  /** true = restaurado imediatamente; false = agendado para o proximo start. */
+  applied: boolean;
+  fileName: string;
+  message: string;
+  requiresRestart: boolean;
+}
+
+/* ---------------- Inteligecia: reposicao ---------------- */
+
+export interface ReplenishmentItem {
+  productId: number;
+  internalCode: string | null;
+  barcode: string | null;
+  name: string;
+  unit: string;
+  stock: number;
+  minStock: number;
+  maxStock: number | null;
+  /** Media diaria de venda na janela analisada. */
+  averageDailySales: number;
+  /** Consumo medio no periodo de cobertura do fornecedor. */
+  consumptionAtLeadTime: number;
+  /** Quanto falta para cobrir o estoque minimo + o prazo do fornecedor. */
+  suggestedQuantity: number;
+  /** Dias ate zerar o estoque no ritmo de venda atual. null = sem venda. */
+  daysOfCoverage: number | null;
+  reason: ReplenishmentReason;
+  confidence: ConfidenceLevel;
+  supplierId: number | null;
+  supplierName: string | null;
+  leadTimeDays: number | null;
+  minOrderQuantity: number | null;
+  /** Ultimo preco pago, para estimar o custo da reposicao. */
+  estimatedUnitCost: number | null;
+  estimatedTotalCents: number | null;
+}
+
+export interface ReplenishmentReport {
+  items: ReplenishmentItem[];
+  summary: {
+    productCount: number;
+    totalEstimatedCents: number;
+    byReason: Record<string, number>;
+  };
+  /** Explicita a base do calculo, conforme o documento exige. */
+  basis: string;
+  windowDays: number;
+  generatedAt: string;
+}
+
+/* ---------------- Inteligecia: produtos parados ---------------- */
+
+export interface StagnantProduct {
+  productId: number;
+  internalCode: string | null;
+  barcode: string | null;
+  name: string;
+  categoryName: string | null;
+  unit: string;
+  stock: number;
+  costPrice: number;
+  salePrice: number;
+  lastSaleAt: string | null;
+  daysWithoutSale: number | null;
+  /** Valor de capital imobilizado no estoque deste produto. */
+  tiedUpValueCents: number;
+  suggestedAction: 'PROMOVER' | 'REPOR' | 'DESATIVAR' | 'AVALIAR';
+}
+
+export interface StagnantReport {
+  items: StagnantProduct[];
+  periods: { days: number; label: string; count: number; tiedUpValueCents: number }[];
+  totalTiedUpValueCents: number;
+  basis: string;
+  generatedAt: string;
+}
+
+/* ---------------- Inteligeencia: sazonalidade ---------------- */
+
+export interface SeasonalityRow {
+  period: string;
+  label: string;
+  salesCount: number;
+  revenueCents: number;
+  itemsSold: number;
+  ticketAverageCents: number;
+  /** Variacao percentual vs. o mesmo periodo do ano anterior. null = sem base. */
+  variationPercent: number | null;
+}
+
+export interface SeasonalityReport {
+  period: SeasonalityPeriod;
+  groupBy: 'MES' | 'CATEGORIA' | 'PRODUTO' | 'VENDEDOR';
+  rows: SeasonalityRow[];
+  totals: {
+    salesCount: number;
+    revenueCents: number;
+    itemsSold: number;
+  };
+  /** true quando ha dados do ano anterior para comparar. */
+  hasComparison: boolean;
+  basis: string;
+  generatedAt: string;
+}
+
+/* ---------------- Inteligecia: previsao de caixa ---------------- */
+
+export interface CashForecastPoint {
+  date: string;
+  label: string;
+  expectedInCents: number;
+  expectedOutCents: number;
+  expectedNetCents: number;
+  /** Saldo projetado se as entradas e saidas planejadas occurrem. */
+  projectedBalanceCents: number;
+  basis: 'HISTORICO' | 'SEM_HISTORICO';
+}
+
+export interface CashForecastReport {
+  currentBalanceCents: number;
+  openSessionId: number | null;
+  points: CashForecastPoint[];
+  averages: {
+    dailyInCents: number;
+    dailyOutCents: number;
+    dailySalesCents: number;
+    daysAnalyzed: number;
+  };
+  confidence: ConfidenceLevel;
+  basis: string;
+  generatedAt: string;
 }

@@ -16,6 +16,8 @@ import { registerDashboardRoutes } from './modules/dashboard/routes.js';
 import { registerReportRoutes } from './modules/reports/routes.js';
 import { registerAuditRoutes } from './modules/audit/routes.js';
 import { registerSystemRoutes } from './modules/system/routes.js';
+import { registerPurchaseRoutes } from './modules/purchases/routes.js';
+import { registerIntelligenceRoutes } from './modules/intelligence/routes.js';
 import {
   registerCategoryRoutes,
   registerBrandRoutes,
@@ -91,10 +93,12 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(registerSupplierRoutes, { prefix: '/api/suppliers' });
   await app.register(registerCustomerRoutes, { prefix: '/api/customers' });
   await app.register(registerStockRoutes, { prefix: '/api/stock' });
+  await app.register(registerPurchaseRoutes, { prefix: '/api/purchases' });
   await app.register(registerSaleRoutes, { prefix: '/api/sales' });
   await app.register(registerCashRoutes, { prefix: '/api/cash' });
   await app.register(registerDashboardRoutes, { prefix: '/api/dashboard' });
   await app.register(registerReportRoutes, { prefix: '/api/reports' });
+  await app.register(registerIntelligenceRoutes, { prefix: '/api/intelligence' });
   await app.register(registerAuditRoutes, { prefix: '/api/audit' });
 
   app.get('/', async () => ({

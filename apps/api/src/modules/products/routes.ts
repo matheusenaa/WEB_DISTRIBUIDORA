@@ -46,12 +46,23 @@ function cacheSet(key: string, product: ProductDTO | null): void {
   barcodeCache.set(key, { expires: Date.now() + config.BARCODE_CACHE_TTL_SECONDS * 1000, product });
 }
 
-function cacheInvalidateProduct(id: number, barcode: string | null): void {
-  if (barcode) barcodeCache.delete(barcode);
+/**
+ * Invalida apenas as entradas de cache do produto alterado.
+ *
+ * Uma versao anterior chamava `barcodeCache.clear()` aqui, o que zerava o
+ * cache de todos os produtos a cada edicao: o operador corrigia o preco de
+ * um item e o PDV passava a consultar o banco em todas as bipadas ate o
+ * TTL expirar. A versao atual remove so as chaves conhecidas e varre o
+ * mapa apenas para finding chaves `id:` (barcode pode ter mudado).
+ */
+function cacheInvalidateProduct(id: number, barcodes: (string | null | undefined)[]): void {
+  for (const barcode of barcodes) {
+    if (barcode) barcodeCache.delete(`barcode:${barcode}`);
+  }
+  // Varredura acotada: remove a entrada de id, cujo barcode pode ter mudado.
   for (const key of barcodeCache.keys()) {
     if (key === `id:${id}`) barcodeCache.delete(key);
   }
-  barcodeCache.clear();
 }
 
 export async function registerProductRoutes(app: FastifyInstance): Promise<void> {
@@ -231,6 +242,7 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
           unit: input.unit,
           status: input.status,
           saleObservation: input.saleObservation || null,
+          location: input.location || null,
         },
         include: productInclude,
       });
@@ -252,7 +264,7 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
     });
 
     const dto = toProductDTO(product);
-    cacheInvalidateProduct(dto.id, dto.barcode);
+    cacheInvalidateProduct(dto.id, [dto.barcode]);
 
     await recordAudit({
       userId: actor.id,
@@ -306,6 +318,7 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
     if (input.unit !== undefined) data.unit = input.unit;
     if (input.status !== undefined) data.status = input.status;
     if (input.saleObservation !== undefined) data.saleObservation = input.saleObservation || null;
+    if (input.location !== undefined) data.location = input.location || null;
 
     const after = await prisma.product.update({
       where: { id },
@@ -313,7 +326,9 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
       include: productInclude,
     });
 
-    cacheInvalidateProduct(id, after.barcode);
+    // Invalida o barcode antigo E o novo: renomear o codigo deixaria a
+    // entrada antiga servindo um produto que ja nao existe mais.
+    cacheInvalidateProduct(id, [after.barcode, before.barcode, input.barcode || null]);
 
     const changes: string[] = [];
     if (input.name !== undefined && input.name !== before.name) changes.push(`nome: "${before.name}" -> "${input.name}"`);
@@ -364,7 +379,7 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
       data: { status },
       include: productInclude,
     });
-    cacheInvalidateProduct(id, after.barcode);
+    cacheInvalidateProduct(id, [after.barcode, before.barcode]);
 
     await recordAudit({
       userId: actor.id,
@@ -398,8 +413,8 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
     if (saleItems > 0) {
       // Produto com historico de vendas e desativado, nunca removido: caso
       // contrario o historico fiscal/contabil perderia a referencia.
-      await prisma.product.update({ where: { id }, data: { status: 'INATIVO' } });
-      cacheInvalidateProduct(id, product.barcode);
+        await prisma.product.update({ where: { id }, data: { status: 'INATIVO' } });
+        cacheInvalidateProduct(id, [product.barcode]);
       await recordAudit({
         userId: actor.id,
         userName: actor.username,
@@ -426,7 +441,7 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
     }
 
     await prisma.product.delete({ where: { id } });
-    cacheInvalidateProduct(id, product.barcode);
+    cacheInvalidateProduct(id, [product.barcode]);
 
     await recordAudit({
       userId: actor.id,

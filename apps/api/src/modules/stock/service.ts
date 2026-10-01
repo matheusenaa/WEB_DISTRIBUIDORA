@@ -1,26 +1,25 @@
 import type { Prisma } from '@prisma/client';
 import type { StockMovementType } from '@webdist/shared';
-import { STOCK_MOVEMENT_LABELS } from '@webdist/shared';
+import {
+  ADJUSTMENT_MOVEMENT_TYPES,
+  INBOUND_MOVEMENT_TYPES,
+  OUTBOUND_MOVEMENT_TYPES,
+  STOCK_MOVEMENT_LABELS,
+} from '@webdist/shared';
 import { prisma, type Tx } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { config } from '../../env.js';
 
-/** Tipos que aumentam o estoque. */
-const INBOUND: ReadonlySet<StockMovementType> = new Set<StockMovementType>([
-  'ENTRADA',
-  'DEVOLUCAO',
-  'TRANSFERENCIA_ENTRADA',
-]);
-
-/** Tipos que reduzem o estoque. */
-const OUTBOUND: ReadonlySet<StockMovementType> = new Set<StockMovementType>([
-  'SAIDA',
-  'PERDA',
-  'TRANSFERENCIA_SAIDA',
-]);
-
-/** Tipos de ajuste: sinal definido pelo valor alvo. */
-const ADJUSTMENT: ReadonlySet<StockMovementType> = new Set<StockMovementType>(['AJUSTE']);
+/**
+ * O sinal de cada tipo e definido AQUI, e nao espalhado pelas rotas.
+ * `VENDA` e `CANCELAMENTO` sao types proprios justamente para que o
+ * relatorio de movimentacoes distinga uma saida comercial de uma perda
+ * ou de um ajuste manual, sem precisar correlacionar com a tabela de
+ * vendas.
+ */
+const INBOUND: ReadonlySet<StockMovementType> = new Set<StockMovementType>(INBOUND_MOVEMENT_TYPES);
+const OUTBOUND: ReadonlySet<StockMovementType> = new Set<StockMovementType>(OUTBOUND_MOVEMENT_TYPES);
+const ADJUSTMENT: ReadonlySet<StockMovementType> = new Set<StockMovementType>(ADJUSTMENT_MOVEMENT_TYPES);
 
 export function isInbound(type: StockMovementType): boolean {
   return INBOUND.has(type);
@@ -47,6 +46,8 @@ export interface ApplyMovementInput {
   userId: number;
   userName?: string;
   saleId?: number | null;
+  /** Vincula a movimentacao a um pedido de compra (recebimento). */
+  purchaseOrderId?: number | null;
   /** Permite estoque negativo mesmo com ALLOW_NEGATIVE_STOCK=false. */
   allowNegative?: boolean;
 }
@@ -169,6 +170,7 @@ export async function applyStockMovement(
       unitCost: unitCostApplied,
       userId: input.userId,
       saleId: input.saleId ?? null,
+      purchaseOrderId: input.purchaseOrderId ?? null,
     },
     select: { id: true },
   });

@@ -1,10 +1,12 @@
 import type { FastifyInstance } from 'fastify';
+import type { Supplier } from '@prisma/client';
 import { z } from 'zod';
 import {
   categorySchema,
   brandSchema,
   supplierSchema,
   customerSchema,
+  type SupplierDTO,
 } from '@webdist/shared';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
@@ -222,6 +224,34 @@ export async function registerBrandRoutes(app: FastifyInstance): Promise<void> {
 /* ------------------------------------------------------------------ */
 /* Fornecedores                                                        */
 /* ------------------------------------------------------------------ */
+/**
+ * Mapper unico do fornecedor.
+ *
+ * Antes cada rota montava seu proprio objeto e a listagem esquecia os
+ * campos de compra, entao a tela de recompra recebia `undefined` sem
+ * erro visivel. Um unico mapper garante que create/patch/list/detail
+ * devolvam exatamente a mesma forma.
+ */
+type SupplierWithCount = Supplier & { _count?: { products: number } };
+
+function toSupplierDTO(s: SupplierWithCount): SupplierDTO {
+  return {
+    id: s.id,
+    name: s.name,
+    document: s.document,
+    email: s.email,
+    phone: s.phone,
+    address: s.address,
+    active: s.active,
+    productCount: s._count?.products ?? 0,
+    leadTimeDays: s.leadTimeDays,
+    minOrderQuantity: s.minOrderQuantity,
+    lastPurchasePrice: s.lastPurchasePrice,
+    lastPurchaseAt: s.lastPurchaseAt ? s.lastPurchaseAt.toISOString() : null,
+    createdAt: s.createdAt.toISOString(),
+  };
+}
+
 export async function registerSupplierRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', { preHandler: [app.requirePermission('suppliers:read')] }, async (request) => {
     const query = z
@@ -241,18 +271,18 @@ export async function registerSupplierRoutes(app: FastifyInstance): Promise<void
     });
 
     return {
-      data: rows.map((s) => ({
-        id: s.id,
-        name: s.name,
-        document: s.document,
-        email: s.email,
-        phone: s.phone,
-        address: s.address,
-        active: s.active,
-        productCount: s._count.products,
-        createdAt: s.createdAt.toISOString(),
-      })),
+      data: rows.map(toSupplierDTO),
     };
+  });
+
+  app.get('/:id', { preHandler: [app.requirePermission('suppliers:read')] }, async (request) => {
+    const { id } = idParam.parse(request.params);
+    const supplier = await prisma.supplier.findUnique({
+      where: { id },
+      include: { _count: { select: { products: true } } },
+    });
+    if (!supplier) throw new AppError('NOT_FOUND', 'Fornecedor nao encontrado.');
+    return toSupplierDTO(supplier);
   });
 
   app.post('/', { preHandler: [app.requirePermission('suppliers:manage')] }, async (request, reply) => {
@@ -266,7 +296,10 @@ export async function registerSupplierRoutes(app: FastifyInstance): Promise<void
         phone: input.phone ?? null,
         address: input.address || null,
         active: input.active,
+        leadTimeDays: input.leadTimeDays ?? 0,
+        minOrderQuantity: input.minOrderQuantity ?? 0,
       },
+      include: { _count: { select: { products: true } } },
     });
     await recordAudit({
       userId: actor.id,
@@ -278,7 +311,7 @@ export async function registerSupplierRoutes(app: FastifyInstance): Promise<void
       after: supplier,
       request,
     });
-    return reply.status(201).send(supplier);
+    return reply.status(201).send(toSupplierDTO(supplier));
   });
 
   app.patch('/:id', { preHandler: [app.requirePermission('suppliers:manage')] }, async (request) => {
@@ -297,8 +330,19 @@ export async function registerSupplierRoutes(app: FastifyInstance): Promise<void
         ...(input.phone !== undefined ? { phone: input.phone ?? null } : {}),
         ...(input.address !== undefined ? { address: input.address || null } : {}),
         ...(input.active !== undefined ? { active: input.active } : {}),
+        ...(input.leadTimeDays !== undefined ? { leadTimeDays: input.leadTimeDays } : {}),
+        ...(input.minOrderQuantity !== undefined ? { minOrderQuantity: input.minOrderQuantity } : {}),
       },
+      include: { _count: { select: { products: true } } },
     });
+
+    const changes: string[] = [];
+    if (input.leadTimeDays !== undefined && input.leadTimeDays !== before.leadTimeDays) {
+      changes.push(`prazo de entrega: ${before.leadTimeDays} -> ${input.leadTimeDays} dias`);
+    }
+    if (input.minOrderQuantity !== undefined && input.minOrderQuantity !== before.minOrderQuantity) {
+      changes.push(`quantidade minima: ${before.minOrderQuantity} -> ${input.minOrderQuantity}`);
+    }
 
     await recordAudit({
       userId: actor.id,
@@ -306,12 +350,14 @@ export async function registerSupplierRoutes(app: FastifyInstance): Promise<void
       action: 'UPDATE',
       entity: 'Supplier',
       entityId: id,
-      description: `${actor.name} alterou o fornecedor "${before.name}"`,
+      description: changes.length
+        ? `${actor.name} alterou o fornecedor "${before.name}": ${changes.join('; ')}`
+        : `${actor.name} alterou o fornecedor "${before.name}"`,
       before,
       after,
       request,
     });
-    return after;
+    return toSupplierDTO(after);
   });
 
   app.delete('/:id', { preHandler: [app.requirePermission('suppliers:manage')] }, async (request) => {

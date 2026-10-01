@@ -58,6 +58,8 @@ export function toProductDTO(product: ProductWithRefs): ProductDTO {
     marginPercent: Number(marginFromPrice(product.salePrice, product.costPrice).toFixed(2)),
     profitCents: product.salePrice - product.costPrice,
     alertLevel: computeAlertLevel(product),
+    location: product.location,
+    lastSaleAt: product.lastSaleAt ? product.lastSaleAt.toISOString() : null,
     createdAt: product.createdAt.toISOString(),
     updatedAt: product.updatedAt.toISOString(),
   };
