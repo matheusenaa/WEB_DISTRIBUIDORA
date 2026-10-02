@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { toast } from 'sonner';
 import { Badge, Card, CardContent, CardHeader } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input } from '@/components/ui/input';
+import { Field, FormError, Input } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { dateTime, initials, relative } from '@/lib/format';
@@ -135,11 +135,7 @@ export function ProfilePage() {
         <Card>
           <CardHeader title="Alterar senha" description="Recomendado trocar a senha padrao" />
           <CardContent className="space-y-4">
-            {passwordError && (
-              <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                {passwordError}
-              </div>
-            )}
+            {passwordError && <FormError>{passwordError}</FormError>}
             <Field label="Senha atual" htmlFor="pf-current" required>
               <Input
                 id="pf-current"

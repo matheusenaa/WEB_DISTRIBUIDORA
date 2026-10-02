@@ -5,8 +5,13 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { App } from './App';
 import { AuthProvider } from './lib/auth';
+import { initTheme, ThemeProvider } from './lib/theme';
 import { ApiError } from './lib/api';
 import './index.css';
+
+// Antes do primeiro render: evita o flash de tema claro em quem escolheu o
+// escuro. Precisa rodar antes do createRoot.
+initTheme();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -30,15 +35,17 @@ createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AuthProvider>
-          <App />
-          <Toaster
-            position="top-right"
-            richColors
-            closeButton
-            toastOptions={{ duration: 4000 }}
-          />
-        </AuthProvider>
+        <ThemeProvider>
+          <AuthProvider>
+            <App />
+            <Toaster
+              position="top-right"
+              richColors
+              closeButton
+              toastOptions={{ duration: 4000 }}
+            />
+          </AuthProvider>
+        </ThemeProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,

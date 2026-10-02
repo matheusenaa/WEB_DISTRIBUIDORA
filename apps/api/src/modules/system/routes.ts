@@ -11,6 +11,8 @@ import {
 } from '@webdist/shared';
 import { prisma } from '../../lib/prisma.js';
 import { connectDatabase } from '../../lib/prisma.js';
+import { getSettings, invalidateSettingsCache, normalizeSettingValue, SETTING_DEFINITIONS as SETTING_LIST } from '../../lib/settings.js';
+import { AppError } from '../../lib/errors.js';
 import { recordAudit } from '../../lib/audit.js';
 import { config } from '../../env.js';
 import type { AuthUser } from '../../plugins/auth.js';
@@ -34,21 +36,11 @@ import {
  * Definicoes de regras de negocio gravadas no banco.
  * A API le do banco; o frontend recebe os valores prontos.
  * Isso evita "informacao hardcoded" e permite ajuste sem novo deploy.
+ *
+ * A lista vive em `lib/settings.ts`, junto com o validador e com o leitor
+ * que as regras de negocio consomem. Aqui so aparece na tela.
  */
-const SETTING_DEFINITIONS = [
-  { key: 'company.name', label: 'Nome da empresa', type: 'text', defaultValue: 'WEB DISTRIBUIDORA' },
-  { key: 'company.document', label: 'CNPJ / CPF', type: 'text', defaultValue: '' },
-  { key: 'company.phone', label: 'Telefone', type: 'text', defaultValue: '' },
-  { key: 'company.address', label: 'Endereco', type: 'text', defaultValue: '' },
-  { key: 'sale.allowNegativeStock', label: 'Permitir venda com estoque negativo', type: 'boolean', defaultValue: 'false' },
-  { key: 'sale.sellerMaxDiscount', label: 'Desconto maximo do vendedor (%)', type: 'number', defaultValue: '0' },
-  { key: 'sale.adminMaxDiscount', label: 'Desconto maximo do administrador (%)', type: 'number', defaultValue: '40' },
-  { key: 'stock.defaultMinAlert', label: 'Estoque minimo padrao de alerta', type: 'number', defaultValue: '5' },
-  { key: 'cash.tolerance', label: 'Tolerancia de divergencia de caixa (R$)', type: 'number', defaultValue: '0.01' },
-  { key: 'print.autoPrintReceipt', label: 'Imprimir cupom automaticamente', type: 'boolean', defaultValue: 'false' },
-  { key: 'print.receiptWidth', label: 'Largura do cupom (58mm/80mm)', type: 'text', defaultValue: '80mm' },
-  { key: 'pdv.requireOpenCash', label: 'Exigir caixa aberto para vender', type: 'boolean', defaultValue: 'true' },
-] as const;
+const SETTING_DEFINITIONS = SETTING_LIST;
 
 export async function registerSystemRoutes(app: FastifyInstance): Promise<void> {
   /* ---------------------------------------------------------------- */
@@ -91,25 +83,19 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       prisma.user.count(),
     ]);
 
-    const settings = await prisma.systemSetting.findMany();
-    const settingMap = new Map(settings.map((s) => [s.key, s.value]));
+    const settings = await getSettings();
 
     return {
       app: { name: 'WEB DISTRIBUIDORA', version: '1.0.0' },
       counts: { products, categories, brands, suppliers, customers, users },
-      company: {
-        name: settingMap.get('company.name') ?? 'WEB DISTRIBUIDORA',
-        document: settingMap.get('company.document') ?? '',
-        phone: settingMap.get('company.phone') ?? '',
-        address: settingMap.get('company.address') ?? '',
-      },
+      company: settings.company,
       settings: {
-        allowNegativeStock: settingMap.get('sale.allowNegativeStock') === 'true',
-        requireOpenCash: (settingMap.get('pdv.requireOpenCash') ?? 'true') === 'true',
-        receiptWidth: settingMap.get('print.receiptWidth') ?? '80mm',
-        autoPrintReceipt: settingMap.get('print.autoPrintReceipt') === 'true',
-        sellerMaxDiscount: Number(settingMap.get('sale.sellerMaxDiscount') ?? '0'),
-        adminMaxDiscount: Number(settingMap.get('sale.adminMaxDiscount') ?? '40'),
+        allowNegativeStock: settings.allowNegativeStock,
+        requireOpenCash: settings.requireOpenCash,
+        receiptWidth: settings.receiptWidth,
+        autoPrintReceipt: settings.autoPrintReceipt,
+        sellerMaxDiscount: settings.sellerMaxDiscountPercent,
+        adminMaxDiscount: settings.adminMaxDiscountPercent,
       },
       enums: {
         units: PRODUCT_UNITS,
@@ -131,9 +117,13 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       data: SETTING_DEFINITIONS.map((def) => ({
         key: def.key,
         label: def.label,
+        group: def.group,
         type: def.type,
+        help: def.help ?? null,
+        options: def.options ?? null,
         value: map.get(def.key) ?? def.defaultValue,
         defaultValue: def.defaultValue,
+        saved: map.has(def.key),
       })),
     };
   });
@@ -147,11 +137,48 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       .object({ settings: z.record(z.string(), z.string().max(500)) })
       .parse(request.body);
 
-    const allowed = new Set<string>(SETTING_DEFINITIONS.map((d) => d.key));
-    const entries = Object.entries(body.settings).filter(([key]) => allowed.has(key));
+    // Validado pela definicao antes de gravar. Sem isso, "abc" em um campo
+    // numerico era aceito e quebrava a regra na leitura seguinte
+    // (`Number('abc')` e NaN), e um desconto de 999% era aceito sem
+    // complaint.
+    const accepted = new Map<string, string>();
+    const rejected: Array<{ key: string; reason: string }> = [];
+
+    for (const [key, rawValue] of Object.entries(body.settings)) {
+      const definition = SETTING_DEFINITIONS.find((d) => d.key === key);
+      if (!definition) {
+        rejected.push({ key, reason: 'Configuracao inexistente.' });
+        continue;
+      }
+      const normalized = normalizeSettingValue(definition, rawValue);
+      if (normalized === null) {
+        rejected.push({
+          key,
+          reason:
+            definition.type === 'number'
+              ? `Valor invalido. Informe um numero${
+                  definition.min !== undefined ? ` entre ${definition.min} e ${definition.max}` : ''
+                }.`
+              : definition.type === 'boolean'
+                ? 'Valor invalido. Use verdadeiro ou falso.'
+                : `Valor invalido. Aceitos: ${(definition.options ?? []).join(', ')}.`,
+        });
+        continue;
+      }
+      accepted.set(key, normalized);
+    }
+
+    const entries = [...accepted.entries()];
 
     if (entries.length === 0) {
-      return { ok: true, updated: 0, message: 'Nenhuma configuracao valida informada.' };
+      if (rejected.length === 0) {
+        return { ok: true, updated: 0, rejected: [], message: 'Nenhuma configuracao valida informada.' };
+      }
+      throw new AppError(
+        'VALIDATION_ERROR',
+        rejected.map((r) => `"${r.key}": ${r.reason}`).join(' '),
+        { rejected },
+      );
     }
 
     const before = await prisma.systemSetting.findMany({
@@ -167,6 +194,10 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
         }),
       ),
     );
+
+    // O cache de regras tem 5s de vida; sem invalidar, quem acabou de
+    // salvar a tela continuaria vendo (e aplicando) o valor antigo.
+    invalidateSettingsCache();
 
     const changed = entries
       .map(([key, value]) => {
@@ -188,7 +219,15 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       });
     }
 
-    return { ok: true, updated: entries.length, message: 'Configuracoes salvas.' };
+    return {
+      ok: true,
+      updated: entries.length,
+      rejected,
+      message:
+        rejected.length > 0
+          ? `${entries.length} configuracao(oes) salva(s); ${rejected.length} recusada(s).`
+          : 'Configuracoes salvas.',
+    };
   });
 
   /* ---------------------------------------------------------------- */

@@ -15,7 +15,7 @@ import {
   type Column,
 } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input, SearchInput, Select } from '@/components/ui/input';
+import { Field, FormError, Input, SearchInput, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useDebounced } from '@/lib/useOnline';
@@ -430,9 +430,7 @@ function UserForm({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
 
         <Field label="Nome completo" htmlFor="u-name" required>
@@ -596,9 +594,7 @@ await api.patch(`/api/users/${user.id}`, { password });
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
         <p className="text-sm text-muted-foreground">
           Informe a nova senha e oriente o usuario a troca-la no primeiro acesso.

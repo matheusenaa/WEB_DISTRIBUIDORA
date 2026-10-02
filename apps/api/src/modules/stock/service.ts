@@ -9,7 +9,7 @@ import {
 } from '@webdist/shared';
 import { prisma, type Tx } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
-import { config } from '../../env.js';
+import { getSettings } from '../../lib/settings.js';
 
 /**
  * O sinal de cada tipo e definido AQUI, e nao espalhado pelas rotas.
@@ -80,7 +80,10 @@ export interface ApplyMovementInput {
   saleId?: number | null;
   /** Vincula a movimentacao a um pedido de compra (recebimento). */
   purchaseOrderId?: number | null;
-  /** Permite estoque negativo mesmo com ALLOW_NEGATIVE_STOCK=false. */
+  /**
+   * Permite estoque negativo. Ausente, vale a configuracao vigente
+   * (`sale.allowNegativeStock` da tela de Configuracoes).
+   */
   allowNegative?: boolean;
 }
 
@@ -103,7 +106,10 @@ export async function applyStockMovement(
   tx: Tx,
   input: ApplyMovementInput,
 ): Promise<MovementResult> {
-  const allowNegative = input.allowNegative ?? config.ALLOW_NEGATIVE_STOCK;
+  // Sem valor explicito, a regra vigente vem das configuracoes. Ler
+  // `config.ALLOW_NEGATIVE_STOCK` aqui faria o ajuste de estoque ignorar o
+  // que o administrador definiu na tela.
+  const allowNegative = input.allowNegative ?? (await getSettings()).allowNegativeStock;
 
   const current = await tx.product.findUnique({
     where: { id: input.productId },

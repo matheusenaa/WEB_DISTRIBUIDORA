@@ -14,7 +14,7 @@ import {
   Spinner,
 } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input, Select, Textarea } from '@/components/ui/input';
+import { Field, FormError, Input, Select, Textarea } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { parseMoneyToCents } from '@webdist/shared';
@@ -369,9 +369,7 @@ function OpenCashModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
         <Field label="Valor inicial" htmlFor="cash-open" required hint="Ex.: 100 ou 100,50">
           <Input
@@ -457,9 +455,7 @@ function EntryModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
         <p className="text-sm text-muted-foreground">
           Use para entradas que nao vieram de vendas: troco recebido de fornecedor, aporte do
@@ -550,9 +546,7 @@ function ExitModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
         <Field label="Tipo de saida" htmlFor="cash-exit-kind" required>
           <Select
@@ -662,9 +656,7 @@ function CloseModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
 
         <dl className="space-y-1.5 rounded-md bg-muted p-3 text-sm">

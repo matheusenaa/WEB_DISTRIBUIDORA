@@ -194,7 +194,10 @@ export const productCreateSchema = z
     costPrice: moneyInputSchema,
     salePrice: moneyInputSchema,
     stock: z.coerce.number().int().min(0, 'Estoque nao pode ser negativo').default(0),
-    minStock: z.coerce.number().int().min(0).default(0),
+    // Opcional de proposito: ausente, a API usa o estoque minimo padrao
+    // configurado. Com `.default(0)` nao haveria como distinguir "nao
+    // informei" de "informei zero" (que significa "sem alerta").
+    minStock: z.coerce.number().int().min(0).optional(),
     maxStock: z.coerce.number().int().min(0).optional(),
     unit: z.enum(PRODUCT_UNITS).default('UN'),
     status: z.enum(PRODUCT_STATUSES).default('ATIVO'),
@@ -205,7 +208,7 @@ export const productCreateSchema = z
     message: 'Codigo de barras invalido',
     path: ['barcode'],
   })
-  .refine((v) => v.maxStock === undefined || v.maxStock >= v.minStock, {
+  .refine((v) => v.maxStock === undefined || v.minStock === undefined || v.maxStock >= v.minStock, {
     message: 'Estoque maximo deve ser maior ou igual ao minimo',
     path: ['maxStock'],
   });

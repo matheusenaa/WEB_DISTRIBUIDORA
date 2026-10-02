@@ -10,8 +10,10 @@ import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { recordAudit } from '../../lib/audit.js';
 import { toProductDTO } from '../../lib/product-mapper.js';
+import { getSettings } from '../../lib/settings.js';
 import { applyStockMovement, describeMovement } from '../stock/service.js';
 import { parseCsv, toCsv } from '../../lib/csv.js';
+import { confirmNfeImport, previewNfe } from './nfe-import.js';
 import { config } from '../../env.js';
 import type { AuthUser } from '../../plugins/auth.js';
 
@@ -237,7 +239,8 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
           costPrice: input.costPrice,
           salePrice: input.salePrice,
           stock: 0,
-          minStock: input.minStock,
+          // Ausente = usa `stock.defaultMinAlert` das configuracoes.
+          minStock: input.minStock ?? (await getSettings()).defaultMinAlert,
           maxStock: input.maxStock ?? null,
           unit: input.unit,
           status: input.status,
@@ -635,6 +638,75 @@ export async function registerProductRoutes(app: FastifyInstance): Promise<void>
         : `Importacao concluida: ${created.length} criados, ${updated.length} atualizados, ${errors.length} com erro.`,
     });
   });
+
+  /* ---------------------------------------------------------------- */
+  /* POST /api/products/import/nfe/preview                             */
+  /* ---------------------------------------------------------------- */
+  /**
+   * Le o XML da NF-e e diz o que seria feito, sem gravar nada.
+   *
+   * `updateExisting` e a unica forma de um item ja cadastrado ser
+   * sobrescrito. Sem ele, a previa marca como IGNORAR: sobrescrever o
+   * preco de venda com o preco de compra da nota mudaria a margem do
+   * negocio por causa de um arquivo importado.
+   */
+  app.post(
+    '/import/nfe/preview',
+    { preHandler: [app.requirePermission('products:create')] },
+    async (request) => {
+      const body = z
+        .object({
+          xml: z.string().min(80, 'Envie o conteudo do arquivo XML da NF-e'),
+          updateExisting: z.boolean().default(false),
+        })
+        .parse(request.body);
+
+      const preview = await previewNfe(body.xml, { updateExisting: body.updateExisting });
+      return { data: preview };
+    },
+  );
+
+  /* ---------------------------------------------------------------- */
+  /* POST /api/products/import/nfe/confirm                             */
+  /* ---------------------------------------------------------------- */
+  app.post(
+    '/import/nfe/confirm',
+    { preHandler: [app.requirePermission('products:create')] },
+    async (request, reply) => {
+      const actor = request.currentUser as AuthUser;
+      const body = z
+        .object({
+          xml: z.string().min(80, 'Envie o conteudo do arquivo XML da NF-e'),
+          lines: z.array(z.number().int().positive()).optional(),
+          updateExisting: z.boolean().default(false),
+          applyStock: z.boolean().default(true),
+          supplierId: z.number().int().positive().nullish(),
+        })
+        .parse(request.body);
+
+      const result = await confirmNfeImport({
+        xml: body.xml,
+        actorId: actor.id,
+        options: {
+          lines: body.lines,
+          updateExisting: body.updateExisting,
+          applyStock: body.applyStock,
+          supplierId: body.supplierId === undefined ? undefined : body.supplierId,
+        },
+      });
+
+      await recordAudit({
+        userId: actor.id,
+        userName: actor.username,
+        action: 'CREATE',
+        entity: 'Product',
+        description: `${actor.name} importou NF-e: ${result.message}`,
+        request,
+      });
+
+      return reply.status(201).send({ data: result });
+    },
+  );
 }
 
 /**

@@ -2,7 +2,11 @@ import { z } from 'zod';
 import { applyPercentDiscount } from '@webdist/shared';
 import { prisma, type Tx } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
-import { config } from '../../env.js';
+import {
+  getSettings,
+  maxDiscountPercentForRole,
+  type ResolvedSettings,
+} from '../../lib/settings.js';
 import { applyStockMovement } from '../stock/service.js';
 
 export interface SaleLineInput {
@@ -34,9 +38,18 @@ export interface PreparedLine {
   costTotal: number;
 }
 
-/** Limite de desconto aplicavel ao perfil do operador. */
-export function maxDiscountForRole(role: 'ADMIN' | 'VENDEDOR'): number {
-  return role === 'ADMIN' ? config.ADMIN_MAX_DISCOUNT_PERCENT : config.SELLER_MAX_DISCOUNT_PERCENT;
+/**
+ * Limite de desconto aplicavel ao perfil do operador.
+ *
+ * Vem das configuracoes gravadas (tela de Configuracoes), nao de variavel
+ * de ambiente: mudar o limite de desconto e uma decisao do dono do
+ * negocio, nao uma troca de ambiente de implantacao.
+ */
+export function maxDiscountForRole(
+  role: 'ADMIN' | 'VENDEDOR',
+  settings: ResolvedSettings,
+): number {
+  return maxDiscountPercentForRole(role, settings);
 }
 
 /**
@@ -49,6 +62,7 @@ export async function prepareSaleLines(
   tx: Tx,
   items: SaleLineInput[],
   actor: SaleActor,
+  settings: ResolvedSettings,
 ): Promise<PreparedLine[]> {
   const productIds = [...new Set(items.map((i) => i.productId))];
   const products = await tx.product.findMany({
@@ -62,7 +76,7 @@ export async function prepareSaleLines(
     throw new AppError('VALIDATION_ERROR', 'Um ou mais produtos da venda nao existem.', { missing });
   }
 
-  const discountLimit = maxDiscountForRole(actor.role);
+  const discountLimit = maxDiscountForRole(actor.role, settings);
   const prepared: PreparedLine[] = [];
   const stockNeeded = new Map<number, number>();
 
@@ -90,33 +104,45 @@ export async function prepareSaleLines(
       throw new AppError('VALIDATION_ERROR', 'Desconto nao pode ser negativo.');
     }
 
-    // Consolida quantidades quando o mesmo produto aparece duas vezes.
-    const existing = prepared.find((p) => p.productId === item.productId);
-    const quantity = (existing?.quantity ?? 0) + item.quantity;
-
     const unitPrice = item.unitPrice ?? product.salePrice;
     const gross = unitPrice * item.quantity;
     const discountCents = gross - applyPercentDiscount(gross, item.discountPercent);
     const subtotal = gross - discountCents;
 
+    /**
+     * Consolida o mesmo produto apenas quando preco e desconto batem.
+     *
+     * Juntar linhas com valores diferentes faria `quantity` e `subtotal`
+     * contarem coisas distintas: o cliente levaria, por exemplo, 5 unidades
+     * e o subtotal cobriria so as 3 da segunda linha. Por isso linhas com
+     * preco ou desconto diferentes permanecem separadas - a baixa de
+     * estoque continua correta porque `stockNeeded` soma por produto.
+     */
+    const existing = prepared.find(
+      (p) =>
+        p.productId === product.id &&
+        p.unitPrice === unitPrice &&
+        p.discountPercent === item.discountPercent,
+    );
+
     if (existing) {
-      existing.quantity = quantity;
-      existing.subtotal = subtotal;
-      existing.costTotal = product.costPrice * quantity;
-      existing.discountCents = gross - subtotal;
+      existing.quantity += item.quantity;
+      existing.subtotal += subtotal;
+      existing.discountCents += discountCents;
+      existing.costTotal = product.costPrice * existing.quantity;
     } else {
       prepared.push({
         productId: product.id,
         productName: product.name,
         productUnit: product.unit,
         barcode: product.barcode,
-        quantity,
+        quantity: item.quantity,
         unitPrice,
         costPrice: product.costPrice,
         discountPercent: item.discountPercent,
         discountCents,
         subtotal,
-        costTotal: product.costPrice * quantity,
+        costTotal: product.costPrice * item.quantity,
       });
     }
 
@@ -126,7 +152,7 @@ export async function prepareSaleLines(
   // Confere estoque considerando o total de cada produto na venda.
   for (const [productId, needed] of stockNeeded) {
     const product = byId.get(productId)!;
-    if (product.stock < needed && !config.ALLOW_NEGATIVE_STOCK) {
+    if (product.stock < needed && !settings.allowNegativeStock) {
       throw new AppError(
         'STOCK_INSUFFICIENT',
         `Estoque insuficiente para "${product.name}". Disponivel: ${product.stock}, solicitado: ${needed}.`,
@@ -136,6 +162,75 @@ export async function prepareSaleLines(
   }
 
   return prepared;
+}
+
+export interface ResolvedDiscounts {
+  grossSubtotal: number;
+  itemsSubtotal: number;
+  itemDiscounts: number;
+  globalDiscount: number;
+  combinedDiscount: number;
+  combinedPercent: number;
+  total: number;
+}
+
+/**
+ * Aplica o desconto global e confere o limite do perfil.
+ *
+ * O limite e sobre o desconto COMBINADO (por item + global), medido sobre o
+ * bruto.
+ *
+ * Medir o global sobre o subtotal ja descontado permitia empilhar duas vezes
+ * o limite: com limite de 20%, 20% em cada item e mais 20% global passavam
+ * pelos dois testes e resultavam em 36% de desconto real. A verificacao
+ * precisa olhar o total, nao cada etapa.
+ *
+ * Funcao pura de proposito: a regra de desconto nao deve depender de banco
+ * para ser testada.
+ */
+export function resolveDiscounts(
+  lines: Pick<PreparedLine, 'unitPrice' | 'quantity' | 'subtotal'>[],
+  requestedGlobalCents: number,
+  discountLimit: number,
+): ResolvedDiscounts {
+  const grossSubtotal = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+  const itemsSubtotal = lines.reduce((sum, l) => sum + l.subtotal, 0);
+  const itemDiscounts = grossSubtotal - itemsSubtotal;
+
+  const globalDiscount = Math.max(0, requestedGlobalCents);
+
+  if (globalDiscount > itemsSubtotal) {
+    // Antes era limitado a itemsSubtotal em silencio, o que registrava uma
+    // venda de total zero sem avisar ninguem. O cliente tem um bug.
+    throw new AppError(
+      'VALIDATION_ERROR',
+      'O desconto global nao pode ser maior que o total dos itens.',
+      { globalDiscountCents: globalDiscount, itemsSubtotal },
+    );
+  }
+
+  const combinedDiscount = itemDiscounts + globalDiscount;
+  const combinedPercent = grossSubtotal > 0 ? (combinedDiscount / grossSubtotal) * 100 : 0;
+
+  if (combinedPercent > discountLimit) {
+    throw new AppError(
+      'DISCOUNT_EXCEEDED',
+      discountLimit === 0
+        ? 'Seu perfil nao permite aplicar desconto nesta venda.'
+        : `Desconto total de ${combinedPercent.toFixed(1)}% excede o limite de ${discountLimit}% para o seu perfil.`,
+      { requestedPercent: Number(combinedPercent.toFixed(2)), limit: discountLimit },
+    );
+  }
+
+  return {
+    grossSubtotal,
+    itemsSubtotal,
+    itemDiscounts,
+    globalDiscount,
+    combinedDiscount,
+    combinedPercent,
+    total: itemsSubtotal - globalDiscount,
+  };
 }
 
 export interface CreateSaleParams {
@@ -160,35 +255,35 @@ export interface CreateSaleResult {
 
 export async function createSale(params: CreateSaleParams): Promise<CreateSaleResult> {
   const { actor } = params;
+  const settings = await getSettings();
+
+  // `pdv.requireOpenCash`: sem caixa aberto, a venda nao teria para onde
+  // registrar a entrada e o caixa nao fecharia. A regra e do dono, entao
+  // vem da configuracao e nao de variavel de ambiente.
+  if (settings.requireOpenCash) {
+    const openSession = await prisma.cashSession.findFirst({
+      where: { status: 'ABERTO' },
+      orderBy: { openedAt: 'desc' },
+      select: { id: true },
+    });
+    if (!openSession) {
+      throw new AppError(
+        'CONFLICT',
+        'Nao ha caixa aberto. Abra o caixa no modulo Financeiro para registrar vendas.',
+      );
+    }
+  }
 
   return prisma.$transaction(
     async (tx) => {
-      const lines = await prepareSaleLines(tx, params.items, actor);
+      const lines = await prepareSaleLines(tx, params.items, actor, settings);
 
-      const grossSubtotal = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
-      const itemsSubtotal = lines.reduce((sum, l) => sum + l.subtotal, 0);
-      const itemDiscounts = grossSubtotal - itemsSubtotal;
+      const { total, combinedDiscount: discountCents, grossSubtotal, itemsSubtotal } = resolveDiscounts(
+        lines,
+        params.globalDiscountCents,
+        maxDiscountForRole(actor.role, settings),
+      );
 
-      // Desconto global (aplicado no carrinho inteiro) respeita o mesmo limite.
-      const discountLimit = maxDiscountForRole(actor.role);
-      let globalDiscount = params.globalDiscountCents;
-      if (itemsSubtotal > 0) {
-        const globalPercent = (globalDiscount / itemsSubtotal) * 100;
-        if (globalPercent > discountLimit) {
-          throw new AppError(
-            'DISCOUNT_EXCEEDED',
-            discountLimit === 0
-              ? 'Seu perfil nao permite aplicar desconto nesta venda.'
-              : `Desconto total de ${globalPercent.toFixed(1)}% excede o limite de ${discountLimit}% para o seu perfil.`,
-            { requestedPercent: Number(globalPercent.toFixed(2)), limit: discountLimit },
-          );
-        }
-      }
-      if (globalDiscount < 0) globalDiscount = 0;
-      if (globalDiscount > itemsSubtotal) globalDiscount = itemsSubtotal;
-
-      const total = itemsSubtotal - globalDiscount;
-      const discountCents = itemDiscounts + globalDiscount;
       const costTotal = lines.reduce((sum, l) => sum + l.costTotal, 0);
 
       // Numeracao sequencial legivel. Em SQLite o max()+1 e seguro porque a
@@ -250,7 +345,7 @@ export async function createSale(params: CreateSaleParams): Promise<CreateSaleRe
           documentNumber: String(number),
           userId: actor.id,
           saleId: sale.id,
-          allowNegative: config.ALLOW_NEGATIVE_STOCK,
+          allowNegative: settings.allowNegativeStock,
         });
         // `lastSaleAt` desnormalizado alimenta a analise de produtos
         // parados sem exigir JOIN com sale_items.

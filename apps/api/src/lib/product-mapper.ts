@@ -1,6 +1,6 @@
 import type { Product } from '@prisma/client';
 import type { ProductDTO, StockAlertLevel } from '@webdist/shared';
-import { marginFromPrice } from '@webdist/shared';
+import { marginFromPrice, markupFromPrice } from '@webdist/shared';
 
 /** Referencias usadas no DTO: basta o nome de cada relacao. */
 export interface ProductWithRefs extends Product {
@@ -56,6 +56,7 @@ export function toProductDTO(product: ProductWithRefs): ProductDTO {
     status: product.status as ProductDTO['status'],
     saleObservation: product.saleObservation,
     marginPercent: Number(marginFromPrice(product.salePrice, product.costPrice).toFixed(2)),
+    markupPercent: Number(markupFromPrice(product.salePrice, product.costPrice).toFixed(2)),
     profitCents: product.salePrice - product.costPrice,
     alertLevel: computeAlertLevel(product),
     location: product.location,

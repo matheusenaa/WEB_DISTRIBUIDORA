@@ -13,7 +13,7 @@ import {
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { recordAudit } from '../../lib/audit.js';
-import { config } from '../../env.js';
+import { getSettings } from '../../lib/settings.js';
 import type { AuthUser } from '../../plugins/auth.js';
 
 const sessionInclude = {
@@ -402,7 +402,10 @@ export async function registerCashRoutes(app: FastifyInstance): Promise<void> {
     });
 
     const difference = result.difference;
-    const withinTolerance = Math.abs(difference) <= config.cashToleranceCents;
+    // Tolerancia configurada na tela de Configuracoes; o `.env` e so o
+    // padrao de fabrica quando a tabela nao tem o registro.
+    const toleranceCents = (await getSettings()).cashToleranceCents;
+    const withinTolerance = Math.abs(difference) <= toleranceCents;
 
     await recordAudit({
       userId: actor.id,
@@ -427,7 +430,7 @@ export async function registerCashRoutes(app: FastifyInstance): Promise<void> {
         expectedAmountCents: result.expected,
         reportedAmountCents: result.reported,
         differenceCents: difference,
-        toleranceCents: config.cashToleranceCents,
+        toleranceCents,
         withinTolerance,
       },
       message:

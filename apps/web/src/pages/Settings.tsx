@@ -1,86 +1,154 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Save, Settings as SettingsIcon } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Save, Settings as SettingsIcon, RotateCcw } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
+import type { SettingDTO, SettingGroup } from '@webdist/shared';
 import { Badge, Card, CardContent, CardHeader } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input } from '@/components/ui/input';
+import { Field, FormError, Input, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/cn';
 
-interface Settings {
-  companyName: string;
-  companyDocument: string;
-  companyEmail: string;
-  companyPhone: string;
-  companyAddress: string;
-  currency: string;
-  lowStockMarginPercent: number;
-  defaultMarginPercent: number;
-  maxDiscountPercent: number;
-  allowNegativeStock: boolean;
-  requireCashSession: boolean;
-  saleObservation: string;
-}
+/**
+ * CONFIGURACOES
+ *
+ * A tela e gerada a partir da lista que a API devolve. O backend decide
+ * quais regras existem, quais valores aceitam e em que secao aparecem.
+ *
+ * Isso nao e uma preferencia de estilo: a versao anterior tinha os
+ * nomes dos campos escritos a mao aqui e na API, e os dois nao
+ * concordavam. A tela lia `data.settings` de uma resposta que devolvia
+ * `data[]`, entao mostrava sempre os valores padrao do proprio arquivo, e
+ * o `PUT` mandava um corpo que a API rejeitava. Nao carregava e nao
+ * salvava nada.
+ */
 
-type SettingsPayload = Record<string, unknown>;
-
-const DEFAULT_SETTINGS: Settings = {
-  companyName: '',
-  companyDocument: '',
-  companyEmail: '',
-  companyPhone: '',
-  companyAddress: '',
-  currency: 'BRL',
-  lowStockMarginPercent: 25,
-  defaultMarginPercent: 30,
-  maxDiscountPercent: 20,
-  allowNegativeStock: false,
-  requireCashSession: true,
-  saleObservation: '',
+const GROUP_LABELS: Record<SettingGroup, { title: string; description: string }> = {
+  EMPRESA: {
+    title: 'Dados da empresa',
+    description: 'Aparecem no cabecalho e no cupom.',
+  },
+  VENDAS: {
+    title: 'Regras de venda',
+    description: 'Aplicadas pelo servidor no momento da venda.',
+  },
+  ESTOQUE: {
+    title: 'Estoque',
+    description: 'Parametros de alerta e reposicao.',
+  },
+  CAIXA: {
+    title: 'Operacao do caixa',
+    description: 'Abertura, fechamento e tolerancias.',
+  },
+  IMPRESSAO: {
+    title: 'Impressao',
+    description: 'Cupom e impressoras locais.',
+  },
 };
+
+const GROUP_ORDER: SettingGroup[] = ['EMPRESA', 'VENDAS', 'ESTOQUE', 'CAIXA', 'IMPRESSAO'];
+
+type Drafts = Record<string, string>;
+
+function toDrafts(settings: SettingDTO[]): Drafts {
+  return Object.fromEntries(settings.map((s) => [s.key, s.value]));
+}
 
 export function SettingsPage() {
   const { can } = useAuth();
   const queryClient = useQueryClient();
-  const [values, setValues] = useState<Settings>(DEFAULT_SETTINGS);
+  const [drafts, setDrafts] = useState<Drafts>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const readOnly = !can('settings:manage');
 
   const settingsQuery = useQuery({
     queryKey: ['settings'],
-    queryFn: () => api.get<{ settings: Settings }>('/api/settings'),
+    queryFn: () => api.get<{ data: SettingDTO[] }>('/api/settings'),
   });
 
   useEffect(() => {
-    if (settingsQuery.data?.settings) {
-      setValues({ ...DEFAULT_SETTINGS, ...settingsQuery.data.settings });
-    }
+    if (settingsQuery.data?.data) setDrafts(toDrafts(settingsQuery.data.data));
+  }, [settingsQuery.data]);
+
+  const groups = useMemo(() => {
+    const all = settingsQuery.data?.data ?? [];
+    return GROUP_ORDER.map((group) => ({
+      group,
+      items: all.filter((item) => item.group === group),
+    })).filter((section) => section.items.length > 0);
   }, [settingsQuery.data]);
 
   const mutation = useMutation({
-    mutationFn: (payload: SettingsPayload) => api.put('/api/settings', payload),
-    onSuccess: () => {
-      toast.success('Configuracoes salvas.');
+    // O corpo e um mapa `{ chave: "valor" }`: os valores sao sempre
+    // string porque a API valida e normaliza cada um pela sua definicao.
+    mutationFn: (settings: Record<string, string>) =>
+      api.put<{ rejected: Array<{ key: string; reason: string }>; message: string }>(
+        '/api/settings',
+        { settings },
+      ),
+    onSuccess: (result) => {
+      if (result.rejected.length > 0) {
+        setFieldErrors(Object.fromEntries(result.rejected.map((r) => [r.key, r.reason])));
+        setError('Uma ou mais configuracoes nao puderam ser salvas.');
+      } else {
+        setFieldErrors({});
+        setError(null);
+      }
+      toast.success(result.message);
       void queryClient.invalidateQueries({ queryKey: ['settings'] });
     },
-    onError: (caught) =>
-      setError(caught instanceof ApiError ? caught.message : 'Nao foi possivel salvar.'),
+    onError: (caught) => {
+      // O erro de validacao da API vem com a lista por chave.
+      const details = caught instanceof ApiError ? caught.details : null;
+      const rejected = Array.isArray(details)
+        ? (details as Array<{ key: string; reason: string }>)
+        : [];
+      if (rejected.length > 0) {
+        setFieldErrors(Object.fromEntries(rejected.map((r) => [r.key, r.reason])));
+      } else {
+        setFieldErrors({});
+      }
+      setError(caught instanceof ApiError ? caught.message : 'Nao foi possivel salvar.');
+    },
   });
 
-  const set = <K extends keyof Settings>(key: K, value: Settings[K]) =>
-    setValues((current) => ({ ...current, [key]: value }));
+  const set = (key: string, value: string) => {
+    setDrafts((current) => ({ ...current, [key]: value }));
+    setFieldErrors((current) => {
+      if (!(key in current)) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+
+  const reset = () => {
+    setDrafts(toDrafts(settingsQuery.data?.data ?? []));
+    setFieldErrors({});
+    setError(null);
+  };
 
   const save = () => {
     setError(null);
-    if (values.companyName.trim().length < 2) {
-      setError('Informe o nome da empresa.');
+    // Manda so o que mudou: reassinar tudo reexecutaria a validacao de
+    // campos que o usuario nem tocou.
+    const original = toDrafts(settingsQuery.data?.data ?? []);
+    const changed = Object.fromEntries(
+      Object.entries(drafts).filter(([key, value]) => original[key] !== value),
+    );
+    if (Object.keys(changed).length === 0) {
+      setError('Nenhuma alteracao a salvar.');
       return;
     }
-    mutation.mutate(values as unknown as SettingsPayload);
+    mutation.mutate(changed);
   };
+
+  const hasChanges =
+    settingsQuery.data != null &&
+    Object.entries(drafts).some(([key, value]) => toDrafts(settingsQuery.data.data)[key] !== value);
 
   return (
     <div className="space-y-4">
@@ -95,10 +163,16 @@ export function SettingsPage() {
           </p>
         </div>
         {!readOnly && (
-          <Button onClick={save} loading={mutation.isPending}>
-            <Save className="h-4 w-4" aria-hidden />
-            Salvar
-          </Button>
+          <>
+            <Button variant="secondary" onClick={reset} disabled={!hasChanges || mutation.isPending}>
+              <RotateCcw className="h-4 w-4" aria-hidden />
+              Descartar
+            </Button>
+            <Button onClick={save} loading={mutation.isPending} disabled={!hasChanges}>
+              <Save className="h-4 w-4" aria-hidden />
+              Salvar
+            </Button>
+          </>
         )}
       </div>
 
@@ -109,141 +183,39 @@ export function SettingsPage() {
         </div>
       )}
 
-      {error && (
-        <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-          {error}
-        </div>
+      {error && <FormError>{error}</FormError>}
+
+      {settingsQuery.isLoading && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Carregando configuracoes...
+        </p>
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader title="Dados da empresa" description="Aparecem nos relatorios e comprovantes" />
-          <CardContent className="space-y-4">
-            <Field label="Nome / razao social" htmlFor="s-company" required>
-              <Input
-                id="s-company"
-                value={values.companyName}
-                onChange={(event) => set('companyName', event.target.value)}
-                disabled={readOnly}
-              />
-            </Field>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="CNPJ / CPF" htmlFor="s-doc">
-                <Input
-                  id="s-doc"
-                  value={values.companyDocument}
-                  onChange={(event) => set('companyDocument', event.target.value)}
-                  disabled={readOnly}
-                />
-              </Field>
-              <Field label="Telefone" htmlFor="s-phone">
-                <Input
-                  id="s-phone"
-                  value={values.companyPhone}
-                  onChange={(event) => set('companyPhone', event.target.value)}
-                  disabled={readOnly}
-                />
-              </Field>
-            </div>
-            <Field label="E-mail" htmlFor="s-email">
-              <Input
-                id="s-email"
-                type="email"
-                value={values.companyEmail}
-                onChange={(event) => set('companyEmail', event.target.value)}
-                disabled={readOnly}
-              />
-            </Field>
-            <Field label="Endereco" htmlFor="s-address">
-              <Input
-                id="s-address"
-                value={values.companyAddress}
-                onChange={(event) => set('companyAddress', event.target.value)}
-                disabled={readOnly}
-              />
-            </Field>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader title="Regras comerciais" description="Padroes aplicados pelo sistema" />
-          <CardContent className="space-y-4">
-            <Field
-              label="Margem padrao para novos produtos (%)"
-              htmlFor="s-margin"
-              hint="Sugestao exibida ao cadastrar produtos."
-            >
-              <Input
-                id="s-margin"
-                type="number"
-                min={0}
-                max={99}
-                value={values.defaultMarginPercent}
-                onChange={(event) => set('defaultMarginPercent', Number(event.target.value))}
-                disabled={readOnly}
-              />
-            </Field>
-            <Field
-              label="Desconto maximo permitido (%)"
-              htmlFor="s-discount"
-              hint="Limite que o vendedor pode conceder no PDV."
-            >
-              <Input
-                id="s-discount"
-                type="number"
-                min={0}
-                max={100}
-                value={values.maxDiscountPercent}
-                onChange={(event) => set('maxDiscountPercent', Number(event.target.value))}
-                disabled={readOnly}
-              />
-            </Field>
-            <Field
-              label="Percentual do minimo para alerta de estoque (%)"
-              htmlFor="s-lowstock"
-              hint="Ex.: 25 significa alertar quando o estoque cair abaixo de 25% do minimo."
-            >
-              <Input
-                id="s-lowstock"
-                type="number"
-                min={0}
-                max={100}
-                value={values.lowStockMarginPercent}
-                onChange={(event) => set('lowStockMarginPercent', Number(event.target.value))}
-                disabled={readOnly}
-              />
-            </Field>
-            <Field label="Observacao padrao nas vendas" htmlFor="s-note">
-              <Input
-                id="s-note"
-                value={values.saleObservation}
-                onChange={(event) => set('saleObservation', event.target.value)}
-                disabled={readOnly}
-                placeholder="Ex.: Venda sujeta a conferencia"
-              />
-            </Field>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader title="Operacao do caixa" />
-          <CardContent className="space-y-3">
-            <ToggleRow
-              label="Exigir caixa aberto para vender"
-              description="Quando ativo, impede o registro de venda se nao houver caixa aberto."
-              checked={values.requireCashSession}
-              disabled={readOnly}
-              onChange={(checked) => set('requireCashSession', checked)}
+        {groups.map((section) => (
+          <Card key={section.group}>
+            <CardHeader
+              title={GROUP_LABELS[section.group].title}
+              description={GROUP_LABELS[section.group].description}
             />
-            <ToggleRow
-              label="Permitir estoque negativo"
-              description="Recomendado manter desativado para evitar venda acima do disponivel."
-              checked={values.allowNegativeStock}
-              disabled={readOnly}
-              onChange={(checked) => set('allowNegativeStock', checked)}
-            />
-          </CardContent>
-        </Card>
+            <CardContent className="space-y-4">
+              {section.items.map((item) => (
+                <SettingField
+                  key={item.key}
+                  item={item}
+                  value={drafts[item.key] ?? item.value}
+                  error={fieldErrors[item.key]}
+                  disabled={readOnly}
+                  changed={
+                    settingsQuery.data != null &&
+                    toDrafts(settingsQuery.data.data)[item.key] !== drafts[item.key]
+                  }
+                  onChange={(value) => set(item.key, value)}
+                />
+              ))}
+            </CardContent>
+          </Card>
+        ))}
 
         <Card>
           <CardHeader title="Sobre o sistema" />
@@ -258,7 +230,7 @@ export function SettingsPage() {
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Moeda</span>
-              <span className="font-medium">{values.currency}</span>
+              <span className="font-medium">BRL</span>
             </div>
             <p className="pt-2 text-xs text-muted-foreground">
               Todos os valores monetarios sao calculados e armazenados em centavos, evitando
@@ -271,32 +243,99 @@ export function SettingsPage() {
   );
 }
 
-function ToggleRow({
-  label,
-  description,
-  checked,
+function SettingField({
+  item,
+  value,
+  error,
   disabled,
+  changed,
   onChange,
 }: {
-  label: string;
-  description: string;
-  checked: boolean;
+  item: SettingDTO;
+  value: string;
+  error: string | undefined;
   disabled: boolean;
-  onChange: (checked: boolean) => void;
+  changed: boolean;
+  onChange: (value: string) => void;
 }) {
+  const inputId = `setting-${item.key.replace(/\./g, '-')}`;
+  const describedBy = error ? `${inputId}-error` : item.help ? `${inputId}-help` : undefined;
+
+  const label = item.label;
+
+  if (item.type === 'boolean') {
+    return (
+      <label
+        className={cn(
+          'flex items-start gap-2.5 rounded-md border border-border p-3',
+          !disabled && 'cursor-pointer',
+          error && 'border-destructive',
+        )}
+      >
+        <input
+          id={inputId}
+          type="checkbox"
+          checked={value === 'true'}
+          disabled={disabled}
+          aria-describedby={describedBy}
+          onChange={(event) => onChange(event.target.checked ? 'true' : 'false')}
+          className="mt-0.5 h-4 w-4 shrink-0 accent-[hsl(var(--accent))] disabled:opacity-50"
+        />
+        <span className="space-y-0.5">
+          <span className="flex items-center gap-2 text-sm font-medium">
+            {item.label}
+            {changed && <Badge tone="accent">alterado</Badge>}
+          </span>
+          {item.help && <span className="block text-xs text-muted-foreground">{item.help}</span>}
+          {error && (
+            <span id={`${inputId}-error`} className="block text-xs text-destructive">
+              {error}
+            </span>
+          )}
+        </span>
+      </label>
+    );
+  }
+
   return (
-    <label className={cn('flex items-start gap-2.5 rounded-md border border-border p-3', !disabled && 'cursor-pointer')}>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-        className="mt-0.5 h-4 w-4 shrink-0 accent-[hsl(var(--accent))] disabled:opacity-50"
-      />
-      <span className="space-y-0.5">
-        <span className="block text-sm font-medium">{label}</span>
-        <span className="block text-xs text-muted-foreground">{description}</span>
-      </span>
-    </label>
+    <Field label={label} htmlFor={inputId} hint={item.help ?? undefined} error={error}>
+      {item.type === 'number' ? (
+        <Input
+          id={inputId}
+          type="number"
+          inputMode="decimal"
+          min={0}
+          value={value}
+          disabled={disabled}
+          aria-describedby={describedBy}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : item.options ? (
+        <Select
+          id={inputId}
+          value={value}
+          disabled={disabled}
+          aria-describedby={describedBy}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          {item.options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </Select>
+      ) : (
+        <Input
+          id={inputId}
+          value={value}
+          disabled={disabled}
+          aria-describedby={describedBy}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      )}
+      {changed && !error && (
+        <span className="block text-xs text-accent">Alterado, ainda nao salvo.</span>
+      )}
+    </Field>
   );
 }

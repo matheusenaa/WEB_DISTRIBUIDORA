@@ -8,7 +8,7 @@ import {
 } from '@webdist/shared';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
-import { computeAlertLevel, suggestRestock } from '../../lib/product-mapper.js';
+import { buildStockAlerts } from '../stock/alerts.js';
 import type { AuthUser } from '../../plugins/auth.js';
 
 interface Range {
@@ -18,6 +18,9 @@ interface Range {
   previousFrom: Date;
   previousTo: Date;
 }
+
+/** Teto do intervalo personalizado, em dias. */
+export const MAX_RANGE_DAYS = 400;
 
 function startOfDay(date: Date): Date {
   const d = new Date(date);
@@ -34,6 +37,19 @@ function endOfDay(date: Date): Date {
 function addDays(date: Date, days: number): Date {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
+  return d;
+}
+
+/**
+ * Desloca meses preservando o dia 1.
+ *
+ * `setMonth` com dia > 28 estouraria para o mes seguinte ("31 de janeiro"
+ * virando 2 ou 3 de marco). Como so é usado para achar primeiros dias de
+ * mes, o dia 1 elimina o problema.
+ */
+function addMonths(date: Date, months: number): Date {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months, 1);
   return d;
 }
 
@@ -108,8 +124,12 @@ export function resolveRange(
         from: prevStart,
         to: endOfDay(addDays(startOfMonth(now), -1)),
         label: DASHBOARD_RANGE_LABELS.MES_ANTERIOR,
-        previousFrom: addDays(prevStart, -1),
-        previousTo: startOfMonth(prevStart),
+        // O periodo anterior de "mes anterior" e o mes que vem antes dele,
+        // inteiro. Antes comparava do ultimo dia do mes antepenultimo ate o
+        // primeiro dia do anterior, uma janela de ~1 ms que nunca tinha
+        // venda: a variacao aparecia sempre como queda para zero.
+        previousFrom: addMonths(prevStart, -1),
+        previousTo: endOfDay(addDays(prevStart, -1)),
       };
     }
     case 'PERSONALIZADO': {
@@ -119,6 +139,17 @@ export function resolveRange(
       const start = startOfDay(from) < startOfDay(to) ? startOfDay(from) : startOfDay(to);
       const end = endOfDay(from) > endOfDay(to) ? endOfDay(from) : endOfDay(to);
       const spanDays = Math.ceil((end.getTime() - start.getTime()) / 86_400_000);
+
+      // A serie diaria e uma entrada por dia e as vendas sao carregadas uma
+      // a uma para agrupar. Sem teto, um intervalo de 5 anos derrubaria a
+      // API e nao caberia em grafico nenhum.
+      if (spanDays > MAX_RANGE_DAYS) {
+        throw new AppError(
+          'VALIDATION_ERROR',
+          `O periodo nao pode passar de ${MAX_RANGE_DAYS} dias. Escolha uma janela menor.`,
+        );
+      }
+
       return {
         from: start,
         to: end,
@@ -149,7 +180,8 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
   app.get('/', { preHandler: [app.requirePermission('dashboard:read')] }, async (request) => {
     const actor = request.currentUser as AuthUser;
     const query = dashboardQuerySchema.parse(request.query ?? {});
-    const range = resolveRange(query.range, query.from, query.to);
+    const now = new Date();
+    const range = resolveRange(query.range, query.from, query.to, now);
 
     // Vendedor sem visao geral ve apenas os proprios numeros.
     const sellerFilter =
@@ -165,8 +197,8 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       itemRows,
       categoryRows,
       previousAgg,
-      alertRows,
       stockAgg,
+      itemsAgg,
     ] = await Promise.all([
       // Colunas minimas: agrupar por dia no servidor exigiria funcao de data
       // especifica do banco. Com filtro de periodo, agrupar em JS e mais
@@ -193,12 +225,18 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         orderBy: { _sum: { quantity: 'desc' } },
         take: 10,
       }),
+      /**
+       * Um agrupamento por produto, sem `take`.
+       *
+       * O resultado e limitado pelo tamanho do catalogo (um produto por
+       * linha), nao pelo volume de vendas. Um teto aqui cortaria produtos
+       * reais e o faturamento de uma categoria sumiria do grafico sem
+       * nenhuma indicacao.
+       */
       prisma.saleItem.groupBy({
         by: ['productId'],
         where: { sale: { ...salesWhere, createdAt: { gte: range.from, lte: range.to } } },
         _sum: { quantity: true, subtotal: true },
-        orderBy: { _sum: { quantity: 'desc' } },
-        take: 200,
       }),
       prisma.sale.aggregate({
         where: {
@@ -208,21 +246,21 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         _count: { _all: true },
         _sum: { total: true },
       }),
-      prisma.product.findMany({
-        where: { status: 'ATIVO', minStock: { gt: 0 } },
-        select: {
-          id: true,
-          internalCode: true,
-          name: true,
-          unit: true,
-          stock: true,
-          minStock: true,
-          maxStock: true,
-        },
-      }),
       prisma.product.aggregate({
         where: { status: 'ATIVO' },
         _count: { _all: true },
+      }),
+      /**
+       * Total de itens vendidos no periodo, sem `take`.
+       *
+       * `itemRows` abaixo e o top 10 e serve so para o grafico. Somar as
+       * quantidades dele aqui fazia o KPI "itens vendidos" contar apenas os
+       * 10 produtos mais vendidos, e o "itens por venda" que vem desse total
+       * saia baixo demais.
+       */
+      prisma.saleItem.aggregate({
+        where: { sale: { ...salesWhere, createdAt: { gte: range.from, lte: range.to } } },
+        _sum: { quantity: true },
       }),
     ]);
 
@@ -258,7 +296,7 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       }
     }
 
-    const itemsSold = itemRows.reduce((sum, r) => sum + (r._sum.quantity ?? 0), 0);
+    const itemsSold = itemsAgg._sum.quantity ?? 0;
 
     /* ---------------- Formas de pagamento ---------------- */
     const paymentMap = new Map<string, number>();
@@ -286,9 +324,17 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       .sort((a, b) => b.value - a.value);
 
     /* ---------------- Produtos mais vendidos ---------------- */
-    const productIds = itemRows.map((r) => r.productId);
+
+    /**
+     * Catalogo de referencia para as duas consultas agrupadas.
+     *
+     * Precisa cobrir `itemRows` (top 10) E `categoryRows` (ate 200): o mapa
+     * era montado so com o top 10, entao todo produto fora dele era tratado
+     * como "sem categoria" e a receita aparecia na categoria errada.
+     */
+    const lookupIds = [...new Set([...itemRows.map((r) => r.productId), ...categoryRows.map((r) => r.productId)])];
     const products = await prisma.product.findMany({
-      where: { id: { in: productIds } },
+      where: { id: { in: lookupIds } },
       select: { id: true, name: true, categoryId: true, unit: true },
     });
     const productById = new Map(products.map((p) => [p.id, p]));
@@ -330,25 +376,11 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
       .sort((a, b) => (b.secondaryValue ?? 0) - (a.secondaryValue ?? 0));
 
     /* ---------------- Alertas e valor de estoque ---------------- */
-    const alerts = alertRows
-      .map((p) => {
-        const level = computeAlertLevel(p);
-        if (!level) return null;
-        return {
-          productId: p.id,
-          code: p.internalCode ?? `#${p.id}`,
-          name: p.name,
-          unit: p.unit,
-          stock: p.stock,
-          minStock: p.minStock,
-          alertLevel: level,
-          suggestedRestock: suggestRestock(p),
-        };
-      })
-      .filter((a): a is NonNullable<typeof a> => a !== null);
 
-    const order = { ZERADO: 0, CRITICO: 1, BAIXO: 2 } as const;
-    alerts.sort((a, b) => order[a.alertLevel] - order[b.alertLevel]);
+    // Reaproveita o modulo de alertas em vez de recalcular aqui: o card de
+    // estoque do dashboard e a tela /alertas mostravam numeros diferentes
+    // porque cada uma tinha sua propria copia da regra.
+    const alerts = (await buildStockAlerts({ noLimit: true })).data;
 
     // Valorizacao do estoque: soma de quantidade x preco, em uma unica varredura.
     const stockValueRows = await prisma.product.findMany({
@@ -384,6 +416,11 @@ export async function registerDashboardRoutes(app: FastifyInstance): Promise<voi
         previousTo: range.previousTo.toISOString(),
         salesCount: previousAgg._count._all,
         revenueCents: previousAgg._sum.total ?? 0,
+        // Periodo ainda em andamento (HOJE, MES_ATUAL, ULTIMOS_N): comparar
+        // 5 dias com 7 ou o mes corrente com o mes inteiro faz o indicador
+        // cair sozinho. A tela usa isto para avisar em vez de mostrar uma
+        // queda que parece desempenho.
+        partial: range.to.getTime() > now.getTime(),
       },
       series: {
         daily: [...byDay.values()],

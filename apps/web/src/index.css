@@ -58,6 +58,65 @@
     --radius: 0.5rem;
   }
 
+  /*
+   * Tema escuro.
+   *
+   * Mesmos matizes do claro, com luminosidade invertida. Nenhuma cor nova foi
+   * inventada: o laranja da marca e o azul da barra lateral continuam sendo
+   * os mesmos, so que ajustados para o fundo escuro. O `--sidebar` fica mais
+   * escuro que o `--background` de proposito - e uma barra lateral, nao uma
+   * superficie.
+   */
+  .dark {
+    color-scheme: dark;
+
+    --background: 213 28% 8%;
+    --foreground: 210 20% 96%;
+
+    --primary: 213 55% 62%;
+    --primary-foreground: 213 63% 10%;
+
+    --secondary: 213 22% 18%;
+    --secondary-foreground: 210 20% 96%;
+
+    --muted: 213 20% 16%;
+    --muted-foreground: 213 14% 65%;
+
+    --accent: 32 95% 55%;
+    --accent-foreground: 213 63% 10%;
+
+    --destructive: 0 65% 58%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 152 45% 52%;
+    --success-foreground: 213 63% 10%;
+
+    --warning: 38 85% 58%;
+    --warning-foreground: 213 63% 10%;
+
+    --card: 213 24% 11%;
+    --card-foreground: 210 20% 96%;
+
+    --popover: 213 24% 11%;
+    --popover-foreground: 210 20% 96%;
+
+    --input: 213 18% 26%;
+    --ring: 32 95% 55%;
+
+    --border: 213 18% 22%;
+
+    --sidebar: 213 40% 6%;
+    --sidebar-foreground: 210 18% 90%;
+    --sidebar-accent: 213 30% 20%;
+    --sidebar-border: 213 22% 16%;
+
+    --chart-1: 213 55% 62%;
+    --chart-2: 32 95% 55%;
+    --chart-3: 152 45% 52%;
+    --chart-4: 0 65% 60%;
+    --chart-5: 268 45% 66%;
+  }
+
   * {
     @apply border-border;
   }
@@ -103,8 +162,13 @@
   .skeleton {
     @apply relative overflow-hidden bg-muted rounded;
   }
+  /*
+   * O brilho usa a cor de texto em opacidade baixa, nao branco fixo: um
+   * gradiente branco sobre o fundo escuro vira um retangulo claro sem
+   * movimento, o oposto de um esqueleto.
+   */
   .skeleton::after {
-    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-white/40 to-transparent;
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r from-transparent via-foreground/10 to-transparent;
     content: '';
   }
 

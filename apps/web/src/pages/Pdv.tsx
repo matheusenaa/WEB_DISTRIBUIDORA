@@ -4,10 +4,13 @@ import {
   AlertTriangle,
   Barcode,
   CreditCard,
+  MessageSquare,
   Minus,
   Plus,
+  Printer,
   ScanBarcode,
   Search,
+  Send,
   ShoppingCart,
   Trash2,
   User,
@@ -17,12 +20,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Badge, Card, CardContent, CardHeader, EmptyState, Modal, Spinner } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input, Select } from '@/components/ui/input';
+import { Field, FormError, Input, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { normalizeBarcode, useBarcodeHandler, type ScanResult } from '@/lib/barcode/BarcodeManager';
 import { cn } from '@/lib/cn';
 import { money, qty } from '@/lib/format';
+import { printReceipt, whatsappReceiptLink } from '@/lib/receipt.js';
 
 /* ---------------- Tipos ---------------- */
 
@@ -48,7 +52,7 @@ interface FoundProduct {
   stock: number;
 }
 
-const QUICK_KEYS = ['F2', 'F4', 'F8'] as const;
+const QUICK_KEYS = ['F2', 'F4', 'F8', 'F9'] as const;
 
 export function PdvPage() {
   const { user, can } = useAuth();
@@ -252,7 +256,15 @@ export function PdvPage() {
 
   /* ---------------- Atalhos de teclado ---------------- */
 
-  useEffect(() => {
+useEffect(() => {
+    /**
+     * F2/F4/F8/F9 so fazem sentido com o carrinho livre. Sem esta guarda,
+     * F8 apertado com o cupom aberto esvaziava o carrinho por baixo do modal
+     * e o operador perdia a venda inteira - o leitor de codigo ja era
+     * desligado nesse estado, os atalhos deviam estar tambem.
+     */
+    if (paymentOpen || cashOpen) return;
+
     const onKey = (event: KeyboardEvent) => {
       const key = event.key;
 
@@ -278,6 +290,13 @@ export function PdvPage() {
         return;
       }
 
+      if (key === QUICK_KEYS[3]) {
+        // F9: abre o caixa.
+        event.preventDefault();
+        setCashOpen(true);
+        return;
+      }
+
       if (key === QUICK_KEYS[2]) {
         // F8: limpa o carrinho.
         if (lines.length === 0) return;
@@ -291,7 +310,7 @@ export function PdvPage() {
 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [lines.length, clearCart]);
+  }, [lines.length, clearCart, paymentOpen, cashOpen]);
 
   const onManualSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -642,6 +661,13 @@ function PaymentModal({
   const [error, setError] = useState<string | null>(null);
   const [customers, setCustomers] = useState<{ id: number; name: string }[]>([]);
 
+  // Estado para a venda concluida (mostrar botoes de imprimir/compartilhar)
+  const [completedSale, setCompletedSale] = useState<{
+    number: number;
+    total: number;
+    changeCents: number;
+    date: string;
+  } | null>(null);
 
   const paidCents = parseMoneyToCents(amountText);
   const isCash = method === 'DINHEIRO';
@@ -655,6 +681,7 @@ function PaymentModal({
       setCustomerId('');
       setNotes('');
       setError(null);
+      setCompletedSale(null);
 
       return;
     }
@@ -694,17 +721,15 @@ function PaymentModal({
         notes: notes.trim() || undefined,
       });
 
-      // Mantem o total visivel antes de limpar o carrinho.
-      setTimeout(() => {
-        onFinish();
-        onClose();
-        toast.success(`Venda #${sale.number} registrada`, {
-          description:
-            sale.changeCents > 0
-              ? `Troco: ${money(sale.changeCents)}`
-              : `Total: ${money(sale.total)}`,
-        });
-      }, 1200);
+      // Mostra botoes de impressao/compartilhamento em vez de fechar automatico
+      setCompletedSale({
+        number: sale.number,
+        total: sale.total,
+        changeCents: sale.changeCents,
+        date: new Date().toLocaleString('pt-BR'),
+      });
+      // Limpa o carrinho em background
+      setTimeout(() => onFinish(), 500);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : 'Nao foi possivel registrar a venda.');
     } finally {
@@ -712,6 +737,101 @@ function PaymentModal({
     }
   };
 
+  const handlePrint = () => {
+    if (!completedSale) return;
+    const customer = customers.find((c) => c.id === Number(customerId));
+    printReceipt({
+      saleNumber: completedSale.number,
+      date: completedSale.date,
+      items: lines.map((l) => ({
+        name: l.name,
+        quantity: l.quantity,
+        unit: l.unit as any,
+        unitPriceCents: l.unitPriceCents,
+        totalCents: Math.round(
+          (applyPercentDiscount(l.unitPriceCents * l.quantity, l.discountPercent) /
+            (l.unitPriceCents * l.quantity || 1)) *
+            l.unitPriceCents * l.quantity,
+        ),
+        discountPercent: l.discountPercent,
+      })),
+      subtotalCents: totals.subtotal,
+      discountCents: totals.discount,
+      totalCents: totals.total,
+      paymentMethod: PAYMENT_METHOD_LABELS[method] ?? method,
+      amountPaidCents: isCash ? (paidCents ?? totals.total) : totals.total,
+      changeCents: completedSale.changeCents,
+      customerName: customer?.name,
+      notes: notes.trim() || undefined,
+    });
+  };
+
+  const handleWhatsApp = async () => {
+    if (!completedSale) return;
+    const customer = customers.find((c) => c.id === Number(customerId));
+    const receiptData = {
+      saleNumber: completedSale.number,
+      date: completedSale.date,
+      items: lines.map((l) => ({
+        name: l.name,
+        quantity: l.quantity,
+        unit: l.unit as any,
+        unitPriceCents: l.unitPriceCents,
+        totalCents: Math.round(
+          (applyPercentDiscount(l.unitPriceCents * l.quantity, l.discountPercent) /
+            (l.unitPriceCents * l.quantity || 1)) *
+            l.unitPriceCents * l.quantity,
+        ),
+        discountPercent: l.discountPercent,
+      })),
+      subtotalCents: totals.subtotal,
+      discountCents: totals.discount,
+      totalCents: totals.total,
+      paymentMethod: PAYMENT_METHOD_LABELS[method] ?? method,
+      amountPaidCents: isCash ? (paidCents ?? totals.total) : totals.total,
+      changeCents: completedSale.changeCents,
+      customerName: customer?.name,
+      notes: notes.trim() || undefined,
+    };
+    const link = await whatsappReceiptLink(receiptData);
+    window.open(link, '_blank');
+  };
+
+  // Se a venda foi concluida, mostra tela de sucesso com botoes
+  if (completedSale) {
+    return (
+      <Modal open={open} onClose={onClose} title="Venda finalizada" size="md">
+        <div className="space-y-4">
+          <div className="text-center py-4">
+            <div className="text-4xl font-bold text-success mb-2">Venda #{completedSale.number}</div>
+            <div className="text-lg text-muted-foreground">Total: {money(completedSale.total)}</div>
+            {completedSale.changeCents > 0 && (
+              <div className="text-lg text-primary">Troco: {money(completedSale.changeCents)}</div>
+            )}
+            <div className="text-sm text-muted-foreground mt-1">{completedSale.date}</div>
+          </div>
+          <div className="divider"></div>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={handlePrint} className="flex-1">
+              <Printer className="h-4 w-4 mr-2" aria-hidden />
+              Imprimir cupom
+            </Button>
+            <Button variant="outline" onClick={handleWhatsApp} className="flex-1">
+              <MessageSquare className="h-4 w-4 mr-2" aria-hidden />
+              <Send className="h-4 w-4 mr-2" aria-hidden />
+              WhatsApp
+            </Button>
+          </div>
+          <div className="flex justify-end pt-2">
+            <Button variant="outline" onClick={onClose}>
+              Fechar
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    );
+}
+  // Tela normal de pagamento
   return (
     <Modal
       open={open}
@@ -735,9 +855,7 @@ function PaymentModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
 
         <dl className="grid grid-cols-3 gap-2 rounded-md bg-muted p-3 text-sm">

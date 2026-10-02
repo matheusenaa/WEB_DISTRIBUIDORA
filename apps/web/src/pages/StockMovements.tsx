@@ -20,7 +20,7 @@ import {
   type Column,
 } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input, SearchInput, Select } from '@/components/ui/input';
+import { Field, FormError, Input, SearchInput, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useBarcodeHandler } from '@/lib/barcode/BarcodeManager';
@@ -424,9 +424,7 @@ function MovementModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
 
         <Field label="Produto" required>
@@ -534,9 +532,12 @@ function AdjustModal({
     if (reason.trim().length < 3) return setError('Justifique o ajuste - ele fica na auditoria.');
     setLoading(true);
     try {
-      await api.post('/api/stock/adjust', {
+await api.post('/api/stock/adjust', {
         productId: product.id,
-        newStock: target,
+        // A API espera `targetStock` (estoque final desejado). Enviar
+        // `newStock` era silenciosamente ignorado pelo Zod e a operacao
+        // falhava com "Informe o motivo" sem deixar claro o motivo real.
+        targetStock: target,
         reason: reason.trim(),
       });
       toast.success('Estoque ajustado.', {
@@ -574,9 +575,7 @@ function AdjustModal({
     >
       <div className="space-y-4">
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
 
         <Field label="Produto" required>

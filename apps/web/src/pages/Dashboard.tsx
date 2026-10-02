@@ -53,6 +53,10 @@ export function DashboardPage() {
       revenue:
         previousRevenue > 0 ? ((kpi.revenueCents - previousRevenue) / previousRevenue) * 100 : null,
       sales: previousSales > 0 ? ((kpi.salesCount - previousSales) / previousSales) * 100 : null,
+      // Com o periodo ainda correndo (o mes comecado, hoje, ultimos 7 dias),
+      // a variacao cai sozinha. O numero continua correto, mas comparar
+      // metade do mes com o mes inteiro e mostrar seta vermelha e enganoso.
+      partial: data.comparison.partial,
     };
   }, [kpi, data]);
 
@@ -152,6 +156,14 @@ export function DashboardPage() {
               tone={kpi.profitCents >= 0 ? 'success' : 'destructive'}
             />
           </div>
+
+          {comparison?.partial && (
+            <p className="flex items-start gap-2 text-xs text-muted-foreground">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
+              O periodo selecionado ainda esta em andamento. A variacao compara com um periodo
+              anterior maior no tempo, entao a queda nao indica necessariamente pior desempenho.
+            </p>
+          )}
 
           {kpi.canceledCount > 0 && (
             <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">

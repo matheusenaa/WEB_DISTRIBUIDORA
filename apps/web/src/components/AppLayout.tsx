@@ -6,7 +6,9 @@ import {
   Keyboard,
   LogOut,
   Menu,
-  ScanBarcode,
+  Monitor,
+  Moon,
+  Sun,
   UserCog,
   Wifi,
   WifiOff,
@@ -15,9 +17,10 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui';
+import { Badge, Modal } from '@/components/ui';
 import { NAV_GROUPS } from '@/config/navigation';
 import { useAuth } from '@/lib/auth';
+import { useTheme, type ThemeChoice } from '@/lib/theme';
 import { useOnlineStatus } from '@/lib/useOnline';
 import { cn } from '@/lib/cn';
 import { initials } from '@/lib/format';
@@ -62,12 +65,16 @@ export function AppLayout() {
     [can],
   );
 
-  // Ctrl+K abre a lista de atalhos.
+  // Ctrl+K (ou Cmd+K no macOS) abre a lista de atalhos.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.ctrlKey && event.key.toLowerCase() === 'k') {
+      // `metaKey` cobre o Cmd do macOS, que e o atalho que o usuario espera
+      // la. Antes so o ctrlKey respondia.
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        setShortcutsOpen((open) => !open);
+        // Abre em vez de alternar: com um modal ja aberto, alternar fechava
+        // o dialogo e deixava o operador onde estava, sem feedback nenhum.
+        setShortcutsOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -252,11 +259,14 @@ export function AppLayout() {
               <span className="hidden sm:inline">{online ? 'Online' : 'Offline'}</span>
             </span>
 
+            <ThemeToggle />
+
             <Button
               variant="ghost"
               size="icon"
               onClick={() => setShortcutsOpen(true)}
               title="Atalhos de teclado (Ctrl+K)"
+              aria-label="Atalhos de teclado"
             >
               <Keyboard className="h-4 w-4" aria-hidden />
             </Button>
@@ -313,6 +323,40 @@ function Breadcrumb() {
   );
 }
 
+/* ---------------- Alternador de tema ---------------- */
+
+/**
+ * Alterna claro/escuro/sistema.
+ *
+ * Vai ate "sistema" em vez de alternar entre dois estados: quem trabalha de
+ * noite e de dia no mesmo aparelho precisa disso, e sem a opcao o tema
+ * ficava preso num dos lados.
+ */
+function ThemeToggle() {
+  const { choice, theme, setChoice } = useTheme();
+
+  const next: ThemeChoice = choice === 'claro' ? 'escuro' : choice === 'escuro' ? 'sistema' : 'claro';
+  const label = { claro: 'claro', escuro: 'escuro', sistema: 'do sistema' }[choice];
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon"
+      onClick={() => setChoice(next)}
+      title={`Tema ${label}. Clique para alternar.`}
+      aria-label={`Tema ${label}. Clique para alternar.`}
+    >
+      {choice === 'sistema' ? (
+        <Monitor className="h-4 w-4" aria-hidden />
+      ) : theme === 'escuro' ? (
+        <Moon className="h-4 w-4" aria-hidden />
+      ) : (
+        <Sun className="h-4 w-4" aria-hidden />
+      )}
+    </Button>
+  );
+}
+
 /* ---------------- Atalhos ---------------- */
 
 /* Atalhos globais e atalhos que valem apenas dentro do PDV. */
@@ -322,63 +366,50 @@ const SHORTCUTS: { keys: string[]; action: string; scope?: string; permission?: 
   { keys: ['F2'], action: 'Iniciar nova venda', scope: 'PDV', permission: 'sales:create' },
   { keys: ['F4'], action: 'Abrir pagamento', scope: 'PDV', permission: 'sales:create' },
   { keys: ['F8'], action: 'Esvaziar carrinho', scope: 'PDV', permission: 'sales:create' },
+  { keys: ['F9'], action: 'Abrir caixa', scope: 'PDV', permission: 'sales:create' },
 ];
 
 function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { can } = useAuth();
-  if (!open) return null;
 
+  /**
+   * Usa o `Modal` compartilhado em vez de um dialogo proprio. A versao
+   * anterior anunciava "Esc fecha a janela" na propria lista de atalhos e nao
+   * tratava Escape - so fechava pelo fundo, pelo X ou por um segundo Ctrl+K.
+   * O Modal compartilhado ainda traz foco preso, retorno de foco e trava de
+   * scroll de graca.
+   */
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Atalhos de teclado"
-        className="relative z-10 w-full max-w-md animate-fade-in rounded-lg border border-border bg-card p-4 shadow-xl"
-      >
-        <div className="mb-3 flex items-center gap-2">
-          <ScanBarcode className="h-4 w-4 text-accent" aria-hidden />
-          <h2 className="text-base font-semibold">Atalhos de teclado</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="ml-auto rounded p-1 text-muted-foreground hover:bg-muted"
-            aria-label="Fechar"
-          >
-            <X className="h-4 w-4" aria-hidden />
-          </button>
-        </div>
-        <ul className="divide-y divide-border">
-          {SHORTCUTS.filter((s) => !s.permission || can(s.permission)).map((shortcut) => (
-            <li key={shortcut.action} className="flex items-center justify-between py-2">
-              <span className="flex items-center gap-2 text-sm">
-                <BookOpen className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
-                {shortcut.action}
-                {shortcut.scope && (
-                  <Badge tone="muted" className="ml-1">
-                    {shortcut.scope}
-                  </Badge>
-                )}
-              </span>
-              <span className="flex gap-1">
-                {shortcut.keys.map((key) => (
-                  <kbd
-                    key={key}
-                    className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold"
-                  >
-                    {key}
-                  </kbd>
-                ))}
-              </span>
-            </li>
-          ))}
-        </ul>
-        <p className="mt-3 text-xs text-muted-foreground">
-          O leitor de codigo de barras funciona automaticamente: basta bipar com o leitor conectado
-          enquanto o PDV estiver aberto.
-        </p>
-      </div>
-    </div>
+    <Modal open={open} onClose={onClose} title="Atalhos de teclado" size="sm">
+      <ul className="divide-y divide-border">
+        {SHORTCUTS.filter((s) => !s.permission || can(s.permission)).map((shortcut) => (
+          <li key={shortcut.action} className="flex items-center justify-between py-2">
+            <span className="flex items-center gap-2 text-sm">
+              <BookOpen className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+              {shortcut.action}
+              {shortcut.scope && (
+                <Badge tone="muted" className="ml-1">
+                  {shortcut.scope}
+                </Badge>
+              )}
+            </span>
+            <span className="flex gap-1">
+              {shortcut.keys.map((key) => (
+                <kbd
+                  key={key}
+                  className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold"
+                >
+                  {key}
+                </kbd>
+              ))}
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-3 text-xs text-muted-foreground">
+        O leitor de codigo de barras funciona automaticamente: basta bipar com o leitor conectado
+        enquanto o PDV estiver aberto.
+      </p>
+    </Modal>
   );
 }

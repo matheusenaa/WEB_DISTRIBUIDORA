@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { recordAudit } from '../../lib/audit.js';
+import { getSettings } from '../../lib/settings.js';
 import { createSale, maxDiscountForRole, saleIdParamSchema } from './service.js';
 import { applyStockMovement, restockSale } from '../stock/service.js';
 import type { AuthUser } from '../../plugins/auth.js';
@@ -90,7 +91,7 @@ export async function registerSaleRoutes(app: FastifyInstance): Promise<void> {
     const missing = productIds.filter((id) => !byId.has(id));
     if (missing.length > 0) throw new AppError('VALIDATION_ERROR', 'Produto nao encontrado na venda.');
 
-    const limit = maxDiscountForRole(actor.role);
+    const limit = maxDiscountForRole(actor.role, await getSettings());
     const lines = items.map((item) => {
       const product = byId.get(item.productId)!;
       const unitPrice = item.unitPrice ?? product.salePrice;
@@ -112,7 +113,17 @@ export async function registerSaleRoutes(app: FastifyInstance): Promise<void> {
     });
 
     const itemsSubtotal = lines.reduce((sum, l) => sum + l.subtotal, 0);
-    const maxGlobal = Math.round((itemsSubtotal * limit) / 100);
+    const grossSubtotal = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+    const alreadyDiscounted = lines.reduce((sum, l) => sum + l.discountCents, 0);
+
+    /**
+     * O limite e sobre o desconto combinado, entao o maximo global e o que
+     * ainda resta depois dos descontos por item - nao o limite inteiro de
+     * novo. Anunciar o limite cheio aqui faria a tela oferecer um desconto
+     * que a API recusa.
+     */
+    const maxCombinedCents = Math.floor((grossSubtotal * limit) / 100);
+    const maxGlobal = Math.max(0, maxCombinedCents - alreadyDiscounted);
     const globalDiscount = Math.min(body.globalDiscountCents ?? 0, maxGlobal);
     const total = itemsSubtotal - globalDiscount;
 

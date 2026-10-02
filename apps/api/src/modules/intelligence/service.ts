@@ -6,6 +6,13 @@ import type {
   SeasonalityPeriod,
   SeasonalityRow,
 } from '@webdist/shared';
+import {
+  buildEntityBreakdown,
+  buildSeasonalitySeries,
+  historyMonths,
+  windowStart,
+  type EntitySale,
+} from './seasonality.js';
 
 /**
  * INTELIGENCIA DE REPOSICAO
@@ -17,11 +24,19 @@ import type {
  * de inventar um numero.
  */
 
-/** Minimo de dias de historico para considerar a media confiavel. */
-const HIGH_CONFIDENCE_DAYS = 60;
-const MEDIUM_CONFIDENCE_DAYS = 30;
-/** Media de venda diaria abaixo da qual o produto e' considerado "lento". */
-const MIN_DAILY_SALES_FOR_CONFIDENCE = 0.05;
+/**
+ * Amostra minima (em unidades vendidas) para considerar o ritmo de venda
+ * confiavel.
+ *
+ * Medido em volume, nao em dias: uma janela de 7 dias com 40 unidades
+ * vendidas e' um bom estimador, enquanto 90 dias com 2 unidades nao dizem
+ * nada sobre o ritmo. O criterio e independente da janela, entao comparar
+ * uma janela curta com uma longa continua fazendo sentido.
+ */
+const HIGH_CONFIDENCE_UNITS = 30;
+const MEDIUM_CONFIDENCE_UNITS = 10;
+const HIGH_CONFIDENCE_DAYS = 30;
+const MEDIUM_CONFIDENCE_DAYS = 12;
 
 export interface ReplenishmentOptions {
   /** Janela de analise do consumo, em dias. */
@@ -38,6 +53,11 @@ export interface ReplenishmentOptions {
  *
  * Um unico GROUP BY sobre sale_items + sales filtrado por data e
  * materialmente mais barato do que buscar os itens e agregar em JS.
+ *
+ * `days` conta DIAS DE VENDA distintos, e nao vendas. Precisa ser o dia
+ * civil: e ele que diz se o produto vende todo dia ou so uma vez por
+ * mes. Ver `dayIndexSql` no fim do arquivo para o porque de nao usar
+ * `date()`.
  */
 async function averageDailySales(
   windowDays: number,
@@ -49,10 +69,10 @@ async function averageDailySales(
     { productId: number; total: number; days: number; lastSale: Date | null }[]
   >`
     SELECT
-      si.productId                     AS productId,
-      SUM(si.quantity)                 AS total,
-      COUNT(DISTINCT date(s.createdAt)) AS days,
-      MAX(s.createdAt)                 AS lastSale
+      si.productId                        AS productId,
+      SUM(si.quantity)                    AS total,
+      COUNT(DISTINCT ${dayIndexSql('s.createdAt')}) AS days,
+      MAX(s.createdAt)                    AS lastSale
     FROM sale_items si
     INNER JOIN sales s ON s.id = si.saleId
     WHERE s.status = 'CONCLUIDA'
@@ -77,10 +97,36 @@ async function averageDailySales(
   return new Map(rows.filter((r) => allowedIds.has(Number(r.productId))).map((r) => [Number(r.productId), r]));
 }
 
-function confidenceFor(avgDailySales: number, daysWithData: number): ConfidenceLevel {
-  if (daysWithData === 0 || avgDailySales < MIN_DAILY_SALES_FOR_CONFIDENCE) return 'SEM_DADOS';
-  if (daysWithData >= HIGH_CONFIDENCE_DAYS) return 'ALTA';
-  if (daysWithData >= MEDIUM_CONFIDENCE_DAYS) return 'MEDIA';
+/**
+ * Indice do dia civil (UTC) de uma coluna DateTime do Prisma.
+ *
+ * NAO usar `date(coluna)`: o Prisma grava DateTime no SQLite como INTEGER
+ * de milissegundos desde a epoch, nao como texto ISO. `date()` recebe um
+ * numero, devolve NULL, e um `COUNT(DISTINCT date(coluna))` conta zero
+ * dias em qualquer consulta. Verificado contra o dev.db:
+ * `typeof(createdAt) = 'integer'`.
+ *
+ * Dividir por 86400000 com divisao inteira da o dia civil em UTC. O fuso
+ * do negocio e aplicado na borda, entao agrupar por dia UTC mantem a
+ * soma do dia igual a soma do dia em qualquer fuso inteiro.
+ */
+const MS_PER_DAY = 86_400_000;
+function dayIndexSql(column: string): string {
+  return `CAST(${column} / ${MS_PER_DAY} AS INTEGER)`;
+}
+
+/**
+ * Confianca no ritmo de venda.
+ *
+ * Baseada no volume observado e na quantidade de dias com venda, e nao em
+ * um prazo fixo: um limiar em dias nao pode funcionar para uma janela de 7
+ * e para uma de 365 ao mesmo tempo (com 7 dias, nenhum produto poderia
+ * jamais alcancar a faixa alta).
+ */
+function confidenceFor(totalUnits: number, daysWithData: number): ConfidenceLevel {
+  if (daysWithData === 0 || totalUnits <= 0) return 'SEM_DADOS';
+  if (totalUnits >= HIGH_CONFIDENCE_UNITS || daysWithData >= HIGH_CONFIDENCE_DAYS) return 'ALTA';
+  if (totalUnits >= MEDIUM_CONFIDENCE_UNITS || daysWithData >= MEDIUM_CONFIDENCE_DAYS) return 'MEDIA';
   return 'BAIXA';
 }
 
@@ -172,9 +218,13 @@ export async function buildReplenishmentReport(
       consumptionAtLeadTime: Number(consumptionAtLeadTime.toFixed(2)),
       suggestedQuantity: suggested,
       daysOfCoverage:
-        averageDaily > 0 ? Number((product.stock / averageDaily).toFixed(1)) : null,
+        // Estoque negativo nao tem "dias de cobertura": o estourou ja.
+        // Reportar -3 dias seria ruido; a urgencia vem do `reason`.
+        averageDaily > 0 && product.stock >= 0
+          ? Number((product.stock / averageDaily).toFixed(1))
+          : null,
       reason,
-      confidence: confidenceFor(averageDaily, daysWithData),
+      confidence: confidenceFor(totalSold, daysWithData),
       supplierId: product.supplier?.id ?? null,
       supplierName: product.supplier?.name ?? null,
       leadTimeDays: product.supplier ? leadTimeDays : null,
@@ -305,10 +355,17 @@ export async function buildStagnantReport(params: {
 /* ------------------------------------------------------------------ */
 
 /**
- * Vendas agrupadas por mes/categoria/produto/vendedor com comparacao
- * contra o mesmo periodo do ano anterior.
+ * Vendas agrupadas no periodo pedido, com comparacao contra o mesmo
+ * periodo do ano anterior.
  *
- * A comparacao so e preenchida quando existe o ano anterior na base: sem
+ * Duas formas, porque as perguntas sao diferentes:
+ *  - `groupBy: 'MES'` e uma serie temporal: uma linha por mes/trimestre/ano,
+ *    dependendo do `period`, cada uma comparada com o balde 12 meses atras.
+ *  - Os demais `groupBy` sao uma quebra por entidade (categoria, produto,
+ *    vendedor) dentro da janela, comparada contra o ano anterior usando
+ *    apenas os meses que existem nos dois anos.
+ *
+ * A comparacao so e preenchida quando existe base no ano anterior: sem
  * historico, `variationPercent` e null e a interface diz "sem base de
  * comparacao", em vez de mostrar 0% (que leria como "estavel").
  */
@@ -326,11 +383,15 @@ export async function buildSeasonalityReport(params: {
   basis: string;
   generatedAt: string;
 }> {
-  const { groupBy, categoryId, limit = 24 } = params;
+  const { period, groupBy, categoryId, limit = 24 } = params;
 
-  // Janela: 24 meses para o agrupamento mensal, 2 anos para o resto.
-  const monthsBack = groupBy === 'MES' ? 24 : 24;
-  const since = new Date(Date.now() - monthsBack * 30.44 * 86_400_000);
+  // Meses de historico: o limite pedido mais um periodo de comparacao,
+  // para que a ultima linha ainda tenha com quem ser comparada.
+  const monthsBack =
+    groupBy === 'MES'
+      ? historyMonths(period, limit)
+      : Math.max(24, 12 * 2);
+  const since = windowStart(new Date(), monthsBack);
 
   const sales = await prisma.sale.findMany({
     where: {
@@ -339,7 +400,6 @@ export async function buildSeasonalityReport(params: {
       ...(categoryId ? { items: { some: { product: { categoryId } } } } : {}),
     },
     select: {
-      id: true,
       createdAt: true,
       total: true,
       sellerId: true,
@@ -355,114 +415,64 @@ export async function buildSeasonalityReport(params: {
     },
   });
 
-  interface Bucket {
-    label: string;
-    salesCount: number;
-    revenueCents: number;
-    itemsSold: number;
-    /** Meses do ano presentes (1-12) para casar com o ano anterior. */
-    monthKeys: Set<string>;
-  }
-  const buckets = new Map<string, Bucket>();
+  let rows: SeasonalityRow[];
+  let hasComparison: boolean;
 
-  const add = (key: string, label: string, monthKey: string, revenue: number, items: number) => {
-    let bucket = buckets.get(key);
-    if (!bucket) {
-      bucket = { label, salesCount: 0, revenueCents: 0, itemsSold: 0, monthKeys: new Set() };
-      buckets.set(key, bucket);
-    }
-    bucket.salesCount += 1;
-    bucket.revenueCents += revenue;
-    bucket.itemsSold += items;
-    bucket.monthKeys.add(monthKey);
-  };
+  if (groupBy === 'MES') {
+    const series = buildSeasonalitySeries(
+      sales.map((sale) => ({
+        createdAt: sale.createdAt,
+        total: sale.total,
+        itemsSold: sale.items.reduce((sum, item) => sum + item.quantity, 0),
+      })),
+      period,
+      limit,
+    );
+    rows = series.rows;
+    hasComparison = series.hasComparison;
+  } else {
+    // Uma venda pode tocar varias linhas. A receita e proporcional a
+    // quantidade de cada item, para nao atribuir o total da venda a cada
+    // entidade e inflar o total da quebra.
+    const attributed: EntitySale[] = [];
+    for (const sale of sales) {
+      const itemsTotal = sale.items.reduce((sum, item) => sum + item.quantity, 0);
 
-  for (const sale of sales) {
-    const monthKey = `${sale.createdAt.getFullYear()}-${sale.createdAt.getMonth()}`;
-
-    if (groupBy === 'MES') {
-      const key = String(sale.createdAt.getFullYear());
-      add(key, String(sale.createdAt.getFullYear()), monthKey, sale.total, sale.items.reduce((s, i) => s + i.quantity, 0));
-    } else if (groupBy === 'VENDEDOR') {
-      add(String(sale.sellerId), sale.seller.name, monthKey, sale.total, sale.items.reduce((s, i) => s + i.quantity, 0));
-    } else {
-      // CATEGORIA e PRODUTO: uma venda pode tocar varias linhas.
-      // A receita e proporcional ao valor do item, para nao atribuir o
-      // total da venda a cada categoria.
-      const itemsTotal = sale.items.reduce((s, i) => s + i.quantity, 0);
       for (const item of sale.items) {
-        if (groupBy === 'CATEGORIA') {
-          const name = item.product.category?.name ?? 'Sem categoria';
-          const share = itemsTotal > 0 ? item.quantity / itemsTotal : 0;
-          add(name, name, monthKey, Math.round(sale.total * share), item.quantity);
-        } else {
-          const key = String(item.product.id);
-          const share = itemsTotal > 0 ? item.quantity / itemsTotal : 0;
-          add(key, item.product.name, monthKey, Math.round(sale.total * share), item.quantity);
-        }
+        const share = itemsTotal > 0 ? item.quantity / itemsTotal : 0;
+        const isSeller = groupBy === 'VENDEDOR';
+        const entityKey = isSeller
+          ? String(sale.sellerId)
+          : groupBy === 'PRODUTO'
+            ? String(item.product.id)
+            : (item.product.category?.name ?? 'Sem categoria');
+        const entityLabel = isSeller
+          ? sale.seller.name
+          : groupBy === 'PRODUTO'
+            ? item.product.name
+            : (item.product.category?.name ?? 'Sem categoria');
+
+        attributed.push({
+          createdAt: sale.createdAt,
+          entityKey,
+          entityLabel,
+          revenueCents: Math.round(sale.total * share),
+          quantity: item.quantity,
+          salesCount: 1,
+        });
       }
     }
+
+    const breakdown = buildEntityBreakdown(attributed, {
+      limit,
+      currentYear: new Date().getFullYear(),
+    });
+    rows = breakdown.rows;
+    hasComparison = breakdown.hasComparison;
   }
 
-  const currentYear = new Date().getFullYear();
-  const previousYear = currentYear - 1;
-
-  // Serie anual: casa os anos pelos MESES, nao pelo total, senao um ano
-  // com 2 meses de dados pareceria igual a um ano completo.
-  const buildRows = (): SeasonalityRow[] =>
-    [...buckets.entries()]
-      .filter(([key]) => {
-        if (groupBy === 'MES') return Number(key) === currentYear || Number(key) === previousYear;
-        return true;
-      })
-      .map(([key, bucket]) => {
-        const revenue = bucket.revenueCents;
-        const monthCount = new Set([...bucket.monthKeys].map((m) => m.split('-')[1])).size || 1;
-
-        let previousRevenue: number | null = null;
-        if (groupBy === 'MES') {
-          const previousKeys = [...bucket.monthKeys].filter((m) => m.startsWith(String(previousYear)));
-          if (previousKeys.length > 0) {
-            previousRevenue = Math.round(
-              (revenue / [...bucket.monthKeys].filter((m) => m.startsWith(String(currentYear))).length) *
-                previousKeys.length,
-            );
-          }
-        } else {
-          const previousBuckets = [...buckets.entries()].filter(
-            ([, b]) => b.label === bucket.label && [...b.monthKeys].some((m) => m.startsWith(String(previousYear))),
-          );
-          if (previousBuckets.length > 0) {
-            previousRevenue = previousBuckets[0]![1].revenueCents;
-          }
-        }
-
-        const variationPercent =
-          previousRevenue !== null && previousRevenue > 0
-            ? Number((((revenue - previousRevenue) / previousRevenue) * 100).toFixed(1))
-            : null;
-
-        return {
-          period: key,
-          label:
-            groupBy === 'MES'
-              ? `${key} (${monthCount} ${monthCount === 1 ? 'mes' : 'meses'} com vendas)`
-              : bucket.label,
-          salesCount: bucket.salesCount,
-          revenueCents: revenue,
-          itemsSold: bucket.itemsSold,
-          ticketAverageCents: bucket.salesCount > 0 ? Math.round(revenue / bucket.salesCount) : 0,
-          variationPercent,
-        };
-      })
-      .sort((a, b) => b.revenueCents - a.revenueCents)
-      .slice(0, limit);
-
-  const rows = buildRows();
-  const hasComparison = rows.some((r) => r.variationPercent !== null);
-
   return {
-    period: params.period,
+    period,
     groupBy,
     rows,
     totals: {
@@ -472,7 +482,9 @@ export async function buildSeasonalityReport(params: {
     },
     hasComparison,
     basis: hasComparison
-      ? 'Comparacao com o mesmo periodo do ano anterior, usando apenas meses presentes nos dois anos.'
+      ? groupBy === 'MES'
+        ? `Comparacao com o mesmo periodo 12 meses antes, balde a balde (${period.toLowerCase()}).`
+        : 'Comparacao com o ano anterior, considerando apenas os meses que existem nos dois anos.'
       : `Analise dos ultimos ${monthsBack} meses. Sem dados do ano anterior para comparacao.`,
     generatedAt: new Date().toISOString(),
   };

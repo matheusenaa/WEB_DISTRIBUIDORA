@@ -16,7 +16,7 @@ import {
   type Column,
 } from '@/components/ui';
 import { Button } from '@/components/ui/button';
-import { Field, Input, SearchInput, Textarea } from '@/components/ui/input';
+import { Field, FormError, Input, SearchInput, Textarea } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useDebounced } from '@/lib/useOnline';
 
@@ -358,9 +358,7 @@ function ResourceForm<T extends ResourceRow>({
     >
       <form onSubmit={submit} className="space-y-4" noValidate>
         {error && (
-          <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-            {error}
-          </div>
+          <FormError>{error}</FormError>
         )}
 
         <div className="grid gap-4 sm:grid-cols-2">

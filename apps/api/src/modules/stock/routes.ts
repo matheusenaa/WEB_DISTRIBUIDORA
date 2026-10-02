@@ -1,11 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { stockMovementSchema, stockQuerySchema, type StockMovementDTO, type StockAlertDTO } from '@webdist/shared';
+import type { StockMovementDTO } from '@webdist/shared';
+import { stockMovementSchema, stockQuerySchema } from '@webdist/shared';
 import { prisma } from '../../lib/prisma.js';
 import { AppError } from '../../lib/errors.js';
 import { recordAudit } from '../../lib/audit.js';
 import { applyStockMovement, describeMovement } from './service.js';
-import { suggestRestock, computeAlertLevel } from '../../lib/product-mapper.js';
+import { buildStockAlerts } from './alerts.js';
 import type { AuthUser } from '../../plugins/auth.js';
 
 export async function registerStockRoutes(app: FastifyInstance): Promise<void> {
@@ -196,31 +197,151 @@ export async function registerStockRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(request.query ?? {});
 
-    const products = await prisma.product.findMany({
-      where: { status: 'ATIVO', minStock: { gt: 0 } },
-      select: { id: true, internalCode: true, name: true, unit: true, stock: true, minStock: true, maxStock: true },
-    });
+    // `noLimit` mantem o resumo e o agrupamento completos mesmo quando a
+    // lista exibida esta truncada: os numeros do cabecalho precisam
+    // refletir a situacao inteira, nao a pagina visivel.
+    return buildStockAlerts({ level: query.level, limit: query.limit, noLimit: true });
+  });
 
-    const alerts: StockAlertDTO[] = [];
-    for (const p of products) {
-      const level = computeAlertLevel(p);
-      if (!level) continue;
-      if (query.level !== 'TODOS' && level !== query.level) continue;
-      alerts.push({
-        productId: p.id,
-        code: p.internalCode ?? `#${p.id}`,
-        name: p.name,
-        unit: p.unit,
-        stock: p.stock,
-        minStock: p.minStock,
-        alertLevel: level,
-        suggestedRestock: suggestRestock(p),
-      });
+  /* ---------------------------------------------------------------- */
+  /* POST /api/stock/restock-order - pedido de compra a partir de      */
+  /* alertas. Agrupa por fornecedor, porque e assim que a compra e     */
+  /* feita de verdade: um pedido por fornecedor, nao um pedido giant.  */
+  /* ---------------------------------------------------------------- */
+  app.post('/restock-order', { preHandler: [app.requirePermission('purchases:create')] }, async (request, reply) => {
+    const actor = request.currentUser as AuthUser;
+    const input = z
+      .object({
+        supplierId: z.coerce.number().int().positive(),
+        /** Quando ausente, usa a quantidade sugerida de cada alerta. */
+        items: z
+          .array(
+            z.object({
+              productId: z.coerce.number().int().positive(),
+              quantity: z.coerce.number().int().positive('Quantidade deve ser maior que zero'),
+              unitCost: z.coerce.number().int().min(0, 'Custo invalido').optional(),
+            }),
+          )
+          .min(1, 'Selecione ao menos um produto')
+          .max(500),
+        notes: z.string().trim().max(600).optional(),
+      })
+      .parse(request.body ?? {});
+
+    const supplier = await prisma.supplier.findUnique({
+      where: { id: input.supplierId },
+      select: { id: true, name: true, active: true, lastPurchasePrice: true },
+    });
+    if (!supplier) throw new AppError('NOT_FOUND', 'Fornecedor nao encontrado.');
+    if (!supplier.active) {
+      throw new AppError('CONFLICT', `O fornecedor "${supplier.name}" esta inativo.`);
     }
 
-    const order = { ZERADO: 0, CRITICO: 1, BAIXO: 2 } as const;
-    alerts.sort((a, b) => order[a.alertLevel] - order[b.alertLevel] || a.stock - b.stock);
+    const products = await prisma.product.findMany({
+      where: { id: { in: input.items.map((i) => i.productId) } },
+      select: { id: true, name: true, unit: true, costPrice: true, supplierId: true, status: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
 
-    return { data: alerts.slice(0, query.limit), total: alerts.length };
+    const missing = input.items.filter((i) => !byId.has(i.productId)).map((i) => i.productId);
+    if (missing.length > 0) {
+      throw new AppError('VALIDATION_ERROR', 'Um ou mais produtos do pedido nao existem.', { missing });
+    }
+
+    // Produto de outro fornecedor no pedido e um erro de operacao: o
+    // preco viria do fornecedor errado e o recebimento atualizaria o
+    // "ultimo preco pago" de forma enganosa.
+    const wrongSupplier = input.items
+      .map((i) => byId.get(i.productId)!)
+      .filter((p) => p.supplierId !== null && p.supplierId !== supplier.id)
+      .map((p) => ({ productId: p.id, name: p.name }));
+    if (wrongSupplier.length > 0) {
+      throw new AppError(
+        'CONFLICT',
+        'Produtos vinculados a outro fornecedor nao podem entrar neste pedido.',
+        { products: wrongSupplier },
+      );
+    }
+
+    // Sem custo informado: usa o custo medio do produto. Sem os dois,
+    // o pedido e criado com custo zero e o operador preenche depois -
+    // bloquear aqui deixaria o operador sem caminho para comprar.
+    const items = input.items.map((item) => {
+      const product = byId.get(item.productId)!;
+      const unitCost = item.unitCost ?? product.costPrice;
+      return {
+        productId: product.id,
+        quantity: item.quantity,
+        unitCost,
+      };
+    });
+
+    const order = await prisma.$transaction(
+      async (tx) => {
+        const last = await tx.purchaseOrder.findFirst({
+          orderBy: { number: 'desc' },
+          select: { number: true },
+        });
+        const created = await tx.purchaseOrder.create({
+          data: {
+            number: (last?.number ?? 0) + 1,
+            supplierId: supplier.id,
+            userId: actor.id,
+            status: 'ABERTO',
+            notes: input.notes?.trim() || 'Gerado a partir dos alertas de estoque',
+            items: {
+              create: items.map((item) => {
+                const product = byId.get(item.productId)!;
+                return {
+                  productId: product.id,
+                  productName: product.name,
+                  unit: product.unit,
+                  quantity: item.quantity,
+                  unitCost: item.unitCost,
+                };
+              }),
+            },
+          },
+          select: { id: true, number: true },
+        });
+        return tx.purchaseOrder.findUniqueOrThrow({
+          where: { id: created.id },
+          include: {
+            supplier: { select: { name: true } },
+            user: { select: { name: true, username: true } },
+            items: { include: { product: { select: { barcode: true, unit: true } } } },
+          },
+        });
+      },
+      { timeout: 20_000 },
+    );
+
+    const totalCents = items.reduce((sum, i) => sum + i.unitCost * i.quantity, 0);
+
+    await recordAudit({
+      userId: actor.id,
+      userName: actor.username,
+      action: 'CREATE',
+      entity: 'PurchaseOrder',
+      entityId: order.id,
+      description: `${actor.name} gerou o pedido de compra #${order.number} para "${supplier.name}" a partir dos alertas de estoque (${items.length} itens, ${(totalCents / 100).toFixed(2)})`,
+      after: { id: order.id, number: order.number, items },
+      request,
+    });
+
+    return reply.status(201).send({
+      ok: true,
+      order: {
+        id: order.id,
+        number: order.number,
+        supplierId: order.supplierId,
+        supplierName: order.supplier.name,
+        status: order.status,
+        itemsCount: order.items.length,
+        totalQuantity: order.items.reduce((sum, i) => sum + i.quantity, 0),
+        totalCents,
+      },
+      message: `Pedido #${order.number} criado para ${supplier.name}.`,
+    });
   });
 }

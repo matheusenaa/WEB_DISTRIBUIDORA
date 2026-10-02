@@ -131,6 +131,8 @@ export interface ProductDTO {
   status: 'ATIVO' | 'INATIVO';
   saleObservation: string | null;
   marginPercent: number;
+  /** Percentual sobre o custo. NAO confundir com margem, que e sobre a venda. */
+  markupPercent: number;
   profitCents: number;
   alertLevel: StockAlertLevel | null;
   /** Endereco no deposito (corredor/prateleira/caixa). */
@@ -172,8 +174,41 @@ export interface StockAlertDTO {
   unit: string;
   stock: number;
   minStock: number;
+  maxStock: number | null;
   alertLevel: StockAlertLevel;
   suggestedRestock: number;
+  /** Custo unitario vigente, para estimar o desembolso da recompra. */
+  costPrice: number;
+  /** Custo x quantidade sugerida. null quando o custo nao e conhecido. */
+  estimatedCostCents: number | null;
+  supplierId: number | null;
+  supplierName: string | null;
+  /** Dias ate zerar no ritmo de venda dos ultimos 30 dias. null = sem venda. */
+  daysOfCoverage: number | null;
+}
+
+/** Resumo por fornecedor para transformar alertas em pedidos de compra. */
+export interface RestockGroupDTO {
+  supplierId: number | null;
+  supplierName: string;
+  productCount: number;
+  totalUnits: number;
+  totalCents: number;
+  /** Quantidade de produtos sem fornecedor definido. */
+  withoutSupplier: number;
+}
+
+export interface StockAlertsReport {
+  data: StockAlertDTO[];
+  total: number;
+  summary: {
+    byLevel: Record<StockAlertLevel, number>;
+    totalUnitsToRestock: number;
+    /** null = parte dos produtos nao tem custo conhecido. */
+    estimatedTotalCents: number | null;
+    productsWithoutCost: number;
+  };
+  groups: RestockGroupDTO[];
 }
 
 /* ---------------- Vendas ---------------- */
@@ -296,6 +331,8 @@ export interface DashboardPayload {
     previousTo: string;
     salesCount: number;
     revenueCents: number;
+    /** O periodo comparado ainda esta em andamento (ex.: mes corrente). */
+    partial: boolean;
   };
   series: {
     daily: TimeSeriesPoint[];
@@ -528,4 +565,47 @@ export interface CashForecastReport {
   confidence: ConfidenceLevel;
   basis: string;
   generatedAt: string;
+}
+
+/* ---------------- Configuracoes ---------------- */
+
+/** Secao da tela de configuracoes. Vem do backend para o agrupamento. */
+export type SettingGroup = 'EMPRESA' | 'VENDAS' | 'ESTOQUE' | 'CAIXA' | 'IMPRESSAO';
+
+export type SettingType = 'text' | 'boolean' | 'number';
+
+/**
+ * Uma configuracao como a API a descreve.
+ *
+ * A tela de Configuracoes e gerada a partir desta lista: o backend e quem
+ * decide quais regras existem, e nao a tela. Sem isso os dois lados
+ * divergem em silencio e a tela mostra campos que a API nao conhece.
+ */
+export interface SettingDTO {
+  key: string;
+  label: string;
+  group: SettingGroup;
+  type: SettingType;
+  /** Explicacao curta do efeito da regra. */
+  help: string | null;
+  /** Valores aceitos quando `type` e 'text' com opcoes. */
+  options: string[] | null;
+  /** Valor vigente, ja normalizado. */
+  value: string;
+  /** Padrao de fabrica, usado quando nada foi gravado. */
+  defaultValue: string;
+  /** false quando a regra ainda esta no padrao (nada gravado no banco). */
+  saved: boolean;
+}
+
+export interface SettingsResponse {
+  data: SettingDTO[];
+}
+
+export interface SettingsSaveResult {
+  ok: boolean;
+  updated: number;
+  /** Configuracoes recusadas com o motivo. */
+  rejected: Array<{ key: string; reason: string }>;
+  message: string;
 }

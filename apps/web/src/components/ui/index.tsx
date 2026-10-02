@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 
 /* ---------------- Card ---------------- */
@@ -90,6 +90,29 @@ export function Badge({
 
 /* ---------------- Modal ---------------- */
 
+/* ---------------- Pilha de modais ---------------- */
+
+/**
+ * Modais abertos, do mais antigo para o mais novo.
+ *
+ * Sem isto, cada modal registra o proprio listener de Escape no `window` e
+ * um unico aperto fecha todos de uma vez. No PDV isso acontece de verdade: o
+ * modal de pagamento e o de caixa ficam montados ao mesmo tempo.
+ */
+const modalStack: string[] = [];
+
+/** Quantos modais estao abertos (para travar o scroll do fundo uma vez). */
+function lockScroll(): void {
+  if (modalStack.length === 1) document.body.style.overflow = 'hidden';
+}
+
+function unlockScroll(): void {
+  if (modalStack.length === 0) document.body.style.overflow = '';
+}
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function Modal({
   open,
   onClose,
@@ -107,15 +130,73 @@ export function Modal({
   footer?: ReactNode;
   size?: 'sm' | 'md' | 'lg' | 'xl' | 'full';
 }) {
-  // Escape fecha o modal.
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     if (!open) return;
+
+    const id = titleId;
+    modalStack.push(id);
+    lockScroll();
+
+    // Elemento que tinha o foco antes do modal abrir. Guardado aqui, e nao
+    // em um ref externo, porque o foco pode ter mudado entre a ordenacao e
+    // o clique que abriu o modal.
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+
+    // O painel precisa receber o foco para que Tab\e possa circular dentro
+    // dele. Sem isso, Tab comeca no documento e o foco vai para tras do
+    // overlay.
+    panelRef.current?.focus();
+
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      // Apenas o modal do topo reage: um Escape fecha uma camada por vez.
+      if (modalStack[modalStack.length - 1] !== id) return;
+
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        onClose();
+        return;
+      }
+
+      if (event.key !== 'Tab') return;
+
+      const focusable = panelRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE);
+      if (!focusable || focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+
+      // Tab no ultimo / Shift+Tab no primeiro volta para o comeco do painel,
+      // em vez de escapar para a pagina de tras.
+      if (event.shiftKey && (active === first || active === panelRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+
+    window.addEventListener('keydown', onKey, true);
+
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      const index = modalStack.indexOf(id);
+      if (index >= 0) modalStack.splice(index, 1);
+      unlockScroll();
+      // Devolve o foco para onde o operador estava. Sem isso o foco cai no
+      // <body> e o proximo Tab recomeca do topo da pagina.
+      if (previouslyFocused && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [open, onClose, titleId]);
 
   if (!open) return null;
 
@@ -135,18 +216,22 @@ export function Modal({
         aria-hidden
       />
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={cn(
-          'relative z-10 flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg border border-border bg-card shadow-xl sm:rounded-lg',
+          'relative z-10 flex max-h-[92vh] w-full flex-col overflow-hidden rounded-t-lg border border-border bg-card shadow-xl outline-none sm:rounded-lg',
           'animate-fade-in',
           widths[size],
         )}
       >
         <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
           <div className="space-y-0.5">
-            <h2 className="text-base font-semibold">{title}</h2>
+            <h2 id={titleId} className="text-base font-semibold">
+              {title}
+            </h2>
             {description && <p className="text-xs text-muted-foreground">{description}</p>}
           </div>
           <button
@@ -192,9 +277,17 @@ export function EmptyState({
   );
 }
 
+export function Skeleton({ className }: { className?: string }) {
+  return <div className={cn('skeleton', className)} aria-hidden />;
+}
+
 export function Spinner({ label = 'Carregando...' }: { label?: string }) {
   return (
-    <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex flex-col items-center justify-center gap-2 py-10 text-sm text-muted-foreground"
+    >
       <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
         <path
@@ -234,7 +327,52 @@ export function DataTable<T>({
   emptyState?: ReactNode;
   loading?: boolean;
 }) {
-  if (loading) return <Spinner />;
+  if (loading) {
+    /**
+     * Esqueleto com a mesma quantidade de linhas e colunas da tabela, em vez
+     * de um "Carregando..." centralizado. O formato da tabela fica reservado
+     * enquanto os dados chegam, entao nao ha o salto de layout que faz a
+     * pagina pular a cada busca.
+     */
+    const rowCount = Math.max(3, Math.min(rows.length || 8, 12));
+    return (
+      <div className="overflow-x-auto">
+        <table className="table-compact w-full border-collapse">
+          <thead className="bg-muted/50">
+            <tr>
+              {columns.map((column) => (
+                <th key={column.key} className={column.className} scope="col">
+                  {column.header}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: rowCount }, (_, rowIndex) => (
+              <tr key={rowIndex}>
+                {columns.map((column) => (
+                  <td key={column.key} className={column.className}>
+                    <Skeleton
+                      className={cn(
+                        'h-4',
+                        // A primeira coluna costuma ser o nome: um bloco mais
+                        // largo imita melhor o conteudo real.
+                        column.key === columns[0]?.key ? 'w-full max-w-[14rem]' : 'w-12 ml-auto',
+                      )}
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="sr-only" role="status">
+          Carregando...
+        </p>
+      </div>
+    );
+  }
+
   if (rows.length === 0) {
     return <>{emptyState ?? <EmptyState title="Nenhum registro encontrado" />}</>;
   }
