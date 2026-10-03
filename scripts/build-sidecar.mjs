@@ -223,6 +223,19 @@ function log(line) {
   }
 }
 
+// Log antes de qualquer outra coisa: se o bootstrap quebrar na sequencia,
+// pelo menos existe um registro de que ele chegou a rodar.
+log('bootstrap iniciado em ' + here + ' via ' + process.execPath);
+
+try {
+  await main();
+} catch (err) {
+  log('FALHA FATAL: ' + (err?.stack ?? err?.message ?? String(err)));
+  process.exit(1);
+}
+
+async function main() {
+
 // Segredos por maquina: nunca versionados, gerados apenas no primeiro boot.
 const envPath = join(dataDir, '.env');
 if (!existsSync(envPath)) {
@@ -279,6 +292,7 @@ child.on('error', (err) => {
   log('falha ao iniciar a API: ' + (err.stack ?? err.message));
   process.exit(1);
 });
+}
 `;
 }
 

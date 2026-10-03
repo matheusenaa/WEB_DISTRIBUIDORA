@@ -1,4 +1,4 @@
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 /**
  * Nomes de arquivo de backup.
@@ -50,6 +50,21 @@ export function timestamp(date = new Date()): string {
  * backups fica na raiz do projeto. Se `dbFile` mudar de lugar, apenas
  * este ponto precisa mudar.
  */
+/**
+ * Pasta de backups para um dado arquivo de banco.
+ *
+ * O layout do repositorio e `<repo>/apps/api/prisma/dev.db` com backups em
+ * `<repo>/backups`, mas no app instalado o banco fica em
+ * `%APPDATA%/WEB DISTRIBUIDORA/dev.db`. Subir sempre `../../..` colocava os
+ * backups na pasta home do usuario (`C:/Users/<nome>/backups`), fora do
+ * aplicativo. Por isso o layout e identificado pelo nome da pasta.
+ */
 export function backupsDirFor(dbFile: string): string {
-  return join(resolve(dirname(dbFile), '../../..'), 'backups');
+  const dir = dirname(dbFile);
+
+  if (basename(dir).toLowerCase() === 'prisma') {
+    return join(resolve(dir, '../../..'), 'backups');
+  }
+
+  return join(dir, 'backups');
 }

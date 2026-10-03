@@ -4,8 +4,8 @@ import { connectDatabase, disconnectDatabase, prisma } from './lib/prisma.js';
 import { applyPendingRestoreIfExists, clearStalePendingRestores } from './lib/restore.js';
 import { assertMovementTypesComplete } from './modules/stock/service.js';
 import { STOCK_MOVEMENT_TYPES } from '@webdist/shared';
-import { readFile, mkdir } from 'node:fs/promises';
-import { join, dirname, resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { join, dirname, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
@@ -27,62 +27,40 @@ function getAppDataDir(): string {
   return resolve(process.cwd(), '..', '..');
 }
 
-/** Resolve o caminho do .sqlite a partir de DATABASE_URL no .env. */
+/**
+ * Resolve o caminho do arquivo SQLite.
+ *
+ * A fonte única é `config.DATABASE_URL`: `env.ts` já transformou o
+ * `file:./dev.db` do `.env` em caminho absoluto no sidecar, e é exatamente
+ * esse valor que o Prisma abriu. Re-ler o `.env` do disco aqui criava uma
+ * segunda resolutions discordante, e o backup falhava com
+ * `unable to open database file` porque apontava para um arquivo que não
+ * existe.
+ */
 async function resolveDatabaseFile(): Promise<{ dbFile: string; root: string }> {
-  const currentFile = fileURLToPath(import.meta.url);
-  const currentDir = dirname(currentFile);
-  
-  // Se for sidecar do Tauri, usa diretório de dados do app
-  if (isTauriSidecar()) {
-    const appDataDir = getAppDataDir();
-    await mkdir(appDataDir, { recursive: true });
-    
-    let url = 'file:./dev.db';
-    // Tenta ler .env do diretório de dados
-    try {
-      const content = await readFile(join(appDataDir, '.env'), 'utf8');
-      const match = content.match(/^\s*DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m);
-      if (match?.[1]) url = match[1].trim();
-    } catch {
-      // .env não existe no diretório de dados, usa padrão
-    }
-    
-    if (!url.startsWith('file:')) {
-      throw new Error('DATABASE_URL não aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
-    }
-    
-    const dbFile = resolve(appDataDir, url.slice('file:'.length));
-    return { dbFile, root: appDataDir };
-  }
-  
-  // Modo desenvolvimento: procura .env subindo diretórios
-  let root = currentDir;
-  for (let i = 0; i < 10; i++) {
-    try {
-      await readFile(join(root, '.env'), 'utf8');
-      break;
-    } catch {
-      const parent = resolve(root, '..');
-      if (parent === root) break;
-      root = parent;
-    }
-  }
-  
-  let url = 'file:./dev.db';
-  try {
-    const content = await readFile(join(root, '.env'), 'utf8');
-    const match = content.match(/^\s*DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m);
-    if (match?.[1]) url = match[1].trim();
-  } catch {
-    // .env ausente: usa o padrão do .env.example.
-  }
-  
+  const url = config.DATABASE_URL;
   if (!url.startsWith('file:')) {
     throw new Error('DATABASE_URL não aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
   }
-  
-  // O Prisma resolve caminhos relativos a pasta prisma/.
-  const dbFile = resolve(root, 'apps', 'api', 'prisma', url.slice('file:'.length));
+
+  const target = url.slice('file:'.length);
+  let dbFile: string;
+
+  if (isAbsolute(target)) {
+    // Sidecar: `env.ts` já entregou o caminho absoluto do usuário.
+    dbFile = target;
+  } else if (isTauriSidecar() || config.NODE_ENV === 'production') {
+    dbFile = resolve(getAppDataDir(), target);
+  } else {
+    // Desenvolvimento: o Prisma resolve relativos a pasta prisma/, que é
+    // `<api>/prisma` relativo a `dist/server.js`.
+    const distDir = dirname(fileURLToPath(import.meta.url));
+    dbFile = resolve(distDir, '..', 'prisma', target);
+  }
+
+  const root = dirname(dbFile);
+  await mkdir(root, { recursive: true });
+
   return { dbFile, root };
 }
 

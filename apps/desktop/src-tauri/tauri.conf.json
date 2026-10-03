@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "WEB DISTRIBUIDORA",
   "version": "1.0.0",
-  "identifier": "br.com.webdistribuidora.app",
+  "identifier": "br.com.webdistribuidora.desktop",
   "build": {
     "frontendDist": "../../web/dist",
     "beforeBuildCommand": "",
@@ -27,19 +27,19 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "publisher": "WEB DISTRIBUIDORA",
     "shortDescription": "Gestao de distribuidora",
     "longDescription": "Sistema completo de gestao para distribuidora: catalogo, estoque, PDV, caixa, relatorios e auditoria.",
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
+        "installMode": "currentUser",
         "languages": ["PortugueseBR"],
         "displayLanguageSelector": false
       }

@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+﻿import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   PRODUCT_UNITS,
@@ -18,7 +18,7 @@ import { config } from '../../env.js';
 import type { AuthUser } from '../../plugins/auth.js';
 import { mkdir, readdir, rm, stat, readFile, rename } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createGzip } from 'node:zlib';
@@ -254,37 +254,26 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  /** Resolve o caminho do .sqlite a partir de DATABASE_URL no .env. */
-  async function resolveDatabaseFile(): Promise<string> {
-    // Em desenvolvimento (tsx), import.meta.url aponta para o arquivo .ts fonte.
-    // Em producao (build), aponta para o arquivo .js em dist/.
-    // Precisamos encontrar a raiz do repositorio de forma robusta.
-    const currentFile = fileURLToPath(import.meta.url);
-    let root = resolve(dirname(currentFile), '../../../..');
-    
-    // Verifica se achou o .env na raiz calculada; se nao, tenta subir mais um nivel
-    // (caso esteja rodando de dist/ em producao)
-    try {
-      await readFile(join(root, '.env'), 'utf8');
-    } catch {
-      root = resolve(root, '..');
-    }
-    
-    let url = 'file:./dev.db';
-    try {
-      const content = await readFile(join(root, '.env'), 'utf8');
-      const match = content.match(/^\s*DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m);
-      if (match?.[1]) url = match[1].trim();
-    } catch {
-      // .env ausente: usa o padrao do .env.example.
-    }
-
+  /**
+   * Caminho do arquivo SQLite aberto pelo Prisma.
+   *
+   * `config.DATABASE_URL` Ã© a fonte Ãºnica: `env.ts` jÃ¡ transformou o
+   * `file:./dev.db` do `.env` em caminho absoluto quando roda como sidecar.
+   * Procurar o `.env` subindo diretÃ³rios aqui nÃ£o encontra o arquivo no
+   * bundle instalado e fazia o backup falhar com `unable to open database
+   * file`, pois apontava para um `dev.db` que nunca existiu.
+   */
+  function resolveDatabaseFile(): string {
+    const url = config.DATABASE_URL;
     if (!url.startsWith('file:')) {
       throw new Error('DATABASE_URL nao aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
     }
 
-    // O Prisma resolve caminhos relativos a pasta prisma/.
-    return resolve(root, 'apps', 'api', 'prisma', url.slice('file:'.length));
+    const target = url.slice('file:'.length);
+    if (isAbsolute(target)) return target;
+
+    // Desenvolvimento: o Prisma resolve relativos a pasta prisma/.
+    return resolve(dirname(fileURLToPath(import.meta.url)), '../../../prisma', target);
   }
 
   /* ---------------- Registro de backups no banco ---------------- */
@@ -343,7 +332,7 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
   }
 
   async function backupsPath(): Promise<string> {
-    return backupsDirFor(await resolveDatabaseFile());
+    return backupsDirFor(resolveDatabaseFile());
   }
 
   /* ---------------------------------------------------------------- */
@@ -352,7 +341,7 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
   app.post('/backup', { preHandler: [app.requirePermission('settings:manage')] }, async (request, reply) => {
     const actor = request.currentUser as AuthUser;
 
-    const dbFile = await resolveDatabaseFile();
+    const dbFile = resolveDatabaseFile();
     const backupDir = await backupsPath();
     await mkdir(backupDir, { recursive: true });
 
@@ -482,7 +471,7 @@ export async function registerSystemRoutes(app: FastifyInstance): Promise<void> 
       return reply.status(400).send({ ok: false, message: 'Nome de arquivo invalido.' });
     }
 
-    const dbFile = await resolveDatabaseFile();
+    const dbFile = resolveDatabaseFile();
     const backupDir = await backupsPath();
     const gzFile = join(backupDir, body.fileName);
 
