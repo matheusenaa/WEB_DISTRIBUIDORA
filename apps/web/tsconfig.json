@@ -17,10 +17,11 @@
     "allowImportingTsExtensions": false,
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
+    "types": ["lucide-react"],
     "paths": {
       "@/*": ["./src/*"],
       "@webdist/shared": ["../../packages/shared/src/index.ts"]
     }
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "vite.config.ts", "global.d.ts"]
 }
