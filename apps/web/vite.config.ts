@@ -7,6 +7,9 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '../..');
 
 export default defineConfig({
+  // Sem isso o Vite procura .env em apps/web e nao encontra o da raiz,
+  // quebrando a embebida de VITE_API_URL no bundle de producao.
+  envDir: repoRoot,
   plugins: [react()],
   resolve: {
     alias: {

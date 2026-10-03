@@ -23,7 +23,7 @@ const schema = z.object({
   API_HOST: z.string().default('0.0.0.0'),
   API_PORT: z.coerce.number().int().min(1).max(65535).default(3333),
   API_PUBLIC_URL: z.string().default('http://localhost:3333'),
-  CORS_ORIGINS: z.string().default('http://localhost:5173'),
+  CORS_ORIGINS: z.string().default('http://localhost:5173,http://127.0.0.1:5173,http://tauri.localhost,tauri://localhost'),
 
   DATABASE_URL: z.string().min(1, 'DATABASE_URL e obrigatorio'),
 

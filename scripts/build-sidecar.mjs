@@ -1,6 +1,6 @@
 import ncc from '@vercel/ncc';
-import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { copyFile, cp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 
 const API_ENTRY = resolve('apps/api/src/server.ts');
 const OUTPUT_DIR = resolve('apps/desktop/src-tauri/binaries');
@@ -20,17 +20,37 @@ async function main() {
   } catch {}
   
   // Bundle with ncc
-  const { code, map, assets } = await ncc(API_ENTRY, {
+  // Nao usar `externals` para @prisma/client: o bundle precisa ser autonomous,
+  // senao o app instalado quebra com ERR_MODULE_NOT_FOUND por nao ter node_modules.
+  const { code, map, assets, errors } = await ncc(API_ENTRY, {
     target: 'es2022',
     minify: true,
     sourceMap: false,
-    externals: ['@prisma/client'],
     v8cache: true,
   });
+  
+  // ncc nao lanca excecao: devolve `errors` e um code vazio. Sem esta
+  // checagem o script escrevia um bundle quebrado e|reportava sucesso.
+  if (errors?.length) {
+    throw new Error(`ncc falhou:\n${errors.map((e) => `  - ${e.message ?? e}`).join('\n')}`);
+  }
+  if (!code) {
+    throw new Error('ncc devolveu bundle vazio');
+  }
   
   // Write bundled file
   const bundledPath = join(OUTPUT_DIR, `${OUTPUT_FILE}.js`);
   await writeFile(bundledPath, code);
+  
+  // ncc emite os assets (engine do Prisma, schema, package.json) como um mapa
+  // nome -> { source }. Descartar esses assets deixa o Prisma sem engine e o
+  // bundle sem o package.json que marca o arquivo como ESM.
+  for (const [filename, asset] of Object.entries(assets ?? {})) {
+    const assetPath = join(OUTPUT_DIR, filename);
+    await mkdir(dirname(assetPath), { recursive: true });
+    await writeFile(assetPath, asset.source);
+    console.log('[sidecar] asset:', filename);
+  }
   
   // Create a simple launcher batch file for Windows
   const launcherContent = `@echo off
@@ -65,7 +85,11 @@ if exist "%NODE_EXE%" (
   // Copy migrations
   const migrationsSrc = join(prismaSrc, 'migrations');
   const migrationsDest = join(prismaDest, 'migrations');
-  await mkdir(migrationsDest, { recursive: true });
+  await rm(migrationsDest, { recursive: true, force: true });
+  await cp(migrationsSrc, migrationsDest, { recursive: true });
+  
+  const migrationDirs = await readdir(migrationsDest);
+  console.log('[sidecar] migrations copiadas:', migrationDirs.join(', ') || '(nenhuma)');
   
   console.log('[sidecar] API sidecar built successfully at:', bundledPath);
   console.log('[sidecar] Launcher created at:', launcherPath);
