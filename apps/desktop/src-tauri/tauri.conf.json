@@ -45,8 +45,10 @@
       }
     },
     "resources": [
-      "binaries/api-sidecar.js",
+      "binaries/api-sidecar.mjs",
       "binaries/api-sidecar.bat",
+      "binaries/nodejs/node.exe",
+      "binaries/api/**/*",
       "binaries/prisma/**/*"
     ]
   }
