@@ -18,6 +18,7 @@ declare module 'lucide-react' {
   export const ArrowRight: LucideIcon;
   export const ArrowUpCircle: LucideIcon;
   export const ArrowUpRight: LucideIcon;
+  export const Ban: LucideIcon;
   export const BarChart: LucideIcon;
   export const BarChart3: LucideIcon;
   export const Barcode: LucideIcon;
@@ -109,8 +110,9 @@ declare module 'lucide-react' {
   export const UserPlus: LucideIcon;
   export const Users: LucideIcon;
   export const Wallet: LucideIcon;
-  export const Wifi: LucideIcon;
-  export const WifiOff: LucideIcon;
-  export const X: LucideIcon;
-  export const XCircle: LucideIcon;
+export const Wifi: LucideIcon;
+export const WifiOff: LucideIcon;
+export const X: LucideIcon;
+export const XCircle: LucideIcon;
+export const Zap: LucideIcon;
 }

@@ -4,25 +4,66 @@ import { connectDatabase, disconnectDatabase, prisma } from './lib/prisma.js';
 import { applyPendingRestoreIfExists, clearStalePendingRestores } from './lib/restore.js';
 import { assertMovementTypesComplete } from './modules/stock/service.js';
 import { STOCK_MOVEMENT_TYPES } from '@webdist/shared';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
+
+/** Detecta se está rodando como sidecar do Tauri. */
+function isTauriSidecar(): boolean {
+  // Verifica variável de ambiente ou caminho do executável
+  const exePath = process.execPath.toLowerCase();
+  return exePath.includes('tauri') || exePath.includes('webdist') || process.env.TAURI_SIDECAR === 'true';
+}
+
+/** Resolve o diretório de dados da aplicação (onde fica o banco). */
+function getAppDataDir(): string {
+  // Em produção/Tauri, usa diretório de dados do usuário
+  if (isTauriSidecar() || config.NODE_ENV === 'production') {
+    const base = process.env.APPDATA || process.env.HOME || homedir();
+    return join(base, 'WEB DISTRIBUIDORA');
+  }
+  // Em desenvolvimento, usa o diretório do projeto
+  return resolve(process.cwd(), '..', '..');
+}
 
 /** Resolve o caminho do .sqlite a partir de DATABASE_URL no .env. */
 async function resolveDatabaseFile(): Promise<{ dbFile: string; root: string }> {
   const currentFile = fileURLToPath(import.meta.url);
   const currentDir = dirname(currentFile);
   
-  // Sobe diretorios ate encontrar o .env (raiz do repositorio)
-  // Funciona tanto em dev (src/) quanto em prod (dist/)
+  // Se for sidecar do Tauri, usa diretório de dados do app
+  if (isTauriSidecar()) {
+    const appDataDir = getAppDataDir();
+    await mkdir(appDataDir, { recursive: true });
+    
+    let url = 'file:./dev.db';
+    // Tenta ler .env do diretório de dados
+    try {
+      const content = await readFile(join(appDataDir, '.env'), 'utf8');
+      const match = content.match(/^\s*DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m);
+      if (match?.[1]) url = match[1].trim();
+    } catch {
+      // .env não existe no diretório de dados, usa padrão
+    }
+    
+    if (!url.startsWith('file:')) {
+      throw new Error('DATABASE_URL não aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
+    }
+    
+    const dbFile = resolve(appDataDir, url.slice('file:'.length));
+    return { dbFile, root: appDataDir };
+  }
+  
+  // Modo desenvolvimento: procura .env subindo diretórios
   let root = currentDir;
   for (let i = 0; i < 10; i++) {
     try {
       await readFile(join(root, '.env'), 'utf8');
-      break; // Achou .env
+      break;
     } catch {
       const parent = resolve(root, '..');
-      if (parent === root) break; // Chegou na raiz do filesystem
+      if (parent === root) break;
       root = parent;
     }
   }
@@ -33,11 +74,11 @@ async function resolveDatabaseFile(): Promise<{ dbFile: string; root: string }> 
     const match = content.match(/^\s*DATABASE_URL\s*=\s*"?([^"\r\n]+)"?/m);
     if (match?.[1]) url = match[1].trim();
   } catch {
-    // .env ausente: usa o padrao do .env.example.
+    // .env ausente: usa o padrão do .env.example.
   }
   
   if (!url.startsWith('file:')) {
-    throw new Error('DATABASE_URL nao aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
+    throw new Error('DATABASE_URL não aponta para SQLite. Use o backup nativo do PostgreSQL (pg_dump).');
   }
   
   // O Prisma resolve caminhos relativos a pasta prisma/.
@@ -47,18 +88,18 @@ async function resolveDatabaseFile(): Promise<{ dbFile: string; root: string }> 
 
 /**
  * Aplica restore pendente e limpa os arquivos que nunca foram aplicados.
- * A implementacao esta em lib/restore.ts.
+ * A implementação está em lib/restore.ts.
  */
 async function runStartupRestore(): Promise<void> {
   /*
-   * Um tipo de movimentacao sem sinal definido nao quebra a compilacao:
-   * o TypeScript aceita o enum, e o erro so apareceria como saldo de
-   * estoque errado em producao. Falhar no startup, logo apos o restore,
-   * e o ponto onde o developer ainda esta olhando o terminal.
+   * Um tipo de movimentação sem sinal definido não quebra a compilação:
+   * o TypeScript aceita o enum, e o erro só apareceria como saldo de
+   * estoque errado em produção. Falhar no startup, logo após o restore,
+   * é o ponto onde o developer ainda está olhando o terminal.
    */
   assertMovementTypesComplete(STOCK_MOVEMENT_TYPES, (type) => {
     throw new Error(
-      `Tipo de movimentacao "${type}" nao pertence a nenhuma lista de sinal ` +
+      `Tipo de movimentação "${type}" não pertence a nenhuma lista de sinal ` +
         '(INBOUND_MOVEMENT_TYPES, OUTBOUND_MOVEMENT_TYPES, ' +
         'ADJUSTMENT_MOVEMENT_TYPES ou DOCUMENTAL_MOVEMENT_TYPES).',
     );
@@ -69,13 +110,13 @@ async function runStartupRestore(): Promise<void> {
   const outcome = await applyPendingRestoreIfExists(dbFile, root);
   if (outcome.applied) {
     console.log(
-      `[STARTUP] Restore concluido: ${outcome.fileName}` +
+      `[STARTUP] Restore concluído: ${outcome.fileName}` +
         (outcome.migrations ? ` | ${outcome.migrations}` : ''),
     );
   } else if (outcome.error) {
     console.error(
-      '[STARTUP] O restore NAO foi concluido. O banco atual permanece intacto; ' +
-        'use o backup de seguranca em backups/ para recuperar.',
+      '[STARTUP] O restore NÃO foi concluído. O banco atual permanece intacto; ' +
+        'use o backup de segurança em backups/ para recuperar.',
     );
   }
 
@@ -88,13 +129,13 @@ async function runStartupRestore(): Promise<void> {
 async function main(): Promise<void> {
   // 1. Aplica restore pendente ANTES de conectar no banco.
   //    Inclui o alinhamento de schema: um backup antigo precisa ser
-  //    atualizado para a versao atual do sistema, senao nao ha usuario
+  //    atualizado para a versão atual do sistema, senão não há usuário
   //    para logar depois do restore.
   await runStartupRestore();
 
   const app = await buildApp();
 
-  // Verifica o banco ANTES de aceitar trafego. Se o banco estiver fora,
+  // Verifica o banco ANTES de aceitar tráfego. Se o banco estiver fora,
   // o sistema informa o erro de forma clara em vez de fingir que funciona.
   try {
     await connectDatabase();
@@ -102,7 +143,7 @@ async function main(): Promise<void> {
   } catch (err) {
     app.log.error({ err }, 'Falha ao conectar no banco de dados.');
     console.error(
-      '\n[ERRO] Nao foi possivel conectar no banco de dados.\n' +
+      '\n[ERRO] Não foi possível conectar no banco de dados.\n' +
         `        DATABASE_URL: ${config.DATABASE_URL.replace(/:[^:@/]+@/, ':***@')}\n` +
         '        Verifique se o arquivo do banco existe e se o prisma generate foi executado.\n',
     );
@@ -130,20 +171,20 @@ async function main(): Promise<void> {
     app.log.error({ reason }, 'Promise rejeitada sem tratamento');
   });
   process.on('uncaughtException', (err) => {
-    app.log.fatal({ err }, 'Excecao nao tratada');
+    app.log.fatal({ err }, 'Exceção não tratada');
     void shutdown('uncaughtException');
   });
 
   try {
     const address = await app.listen({ port: config.API_PORT, host: config.API_HOST });
     app.log.info(`API ouvindo em ${address}`);
-    app.log.info(`Ambiente: ${config.NODE_ENV} | Documentacao de saude: ${address}/api/health`);
+    app.log.info(`Ambiente: ${config.NODE_ENV} | Documentação de saúde: ${address}/api/health`);
 
     if (config.isProduction) {
       const count = await prisma.user.count();
       if (count === 0) {
         app.log.warn(
-          'Nenhum usuario cadastrado. Rode "npm run db:seed" antes de usar o sistema em producao.',
+          'Nenhum usuário cadastrado. Rode "npm run db:seed" antes de usar o sistema em produção.',
         );
       }
     }

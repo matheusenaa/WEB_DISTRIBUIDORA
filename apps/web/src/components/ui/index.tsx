@@ -1,6 +1,10 @@
 import { X } from 'lucide-react';
 import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
+import { Skeleton, Spinner } from './skeleton-basic';
+import { TableSkeleton, CardSkeleton, ListSkeleton, StatCardSkeleton, DashboardSkeleton } from './skeleton-advanced';
+
+export { Skeleton, Spinner, TableSkeleton, CardSkeleton, ListSkeleton, StatCardSkeleton, DashboardSkeleton };
 
 /* ---------------- Card ---------------- */
 
@@ -273,30 +277,6 @@ export function EmptyState({
       <p className="font-medium">{title}</p>
       {description && <p className="max-w-sm text-sm text-muted-foreground">{description}</p>}
       {action && <div className="mt-2">{action}</div>}
-    </div>
-  );
-}
-
-export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn('skeleton', className)} aria-hidden />;
-}
-
-export function Spinner({ label = 'Carregando...' }: { label?: string }) {
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      className="flex flex-col items-center justify-center gap-2 py-10 text-sm text-muted-foreground"
-    >
-      <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
-        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-        <path
-          className="opacity-75"
-          fill="currentColor"
-          d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-        />
-      </svg>
-      {label}
     </div>
   );
 }

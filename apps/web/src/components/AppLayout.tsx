@@ -1,23 +1,7 @@
-import type { Permission } from '@webdist/shared';
-import {
-  BookOpen,
-  ChevronLeft,
-  ChevronRight,
-  Keyboard,
-  LogOut,
-  Menu,
-  Monitor,
-  Moon,
-  Sun,
-  UserCog,
-  Wifi,
-  WifiOff,
-  X,
-} from 'lucide-react';
+import { ChevronLeft, ChevronRight, Keyboard, LogOut, Menu, Monitor, Moon, Sun, UserCog, Wifi, WifiOff, X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
-import { Badge, Modal } from '@/components/ui';
 import { NAV_GROUPS } from '@/config/navigation';
 import { useAuth } from '@/lib/auth';
 import { useTheme, type ThemeChoice } from '@/lib/theme';
@@ -25,6 +9,7 @@ import { useOnlineStatus } from '@/lib/useOnline';
 import { cn } from '@/lib/cn';
 import { initials } from '@/lib/format';
 import { ROLE_LABELS } from '@webdist/shared';
+import { CommandPalette } from '@/components/CommandPalette';
 
 /**
  * Estrutura da aplicacao: barra lateral por permissao + area de conteudo.
@@ -43,7 +28,7 @@ export function AppLayout() {
     () => localStorage.getItem(SIDEBAR_KEY) === 'true',
   );
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(SIDEBAR_KEY, String(collapsed));
@@ -65,7 +50,7 @@ export function AppLayout() {
     [can],
   );
 
-  // Ctrl+K (ou Cmd+K no macOS) abre a lista de atalhos.
+  // Ctrl+K (ou Cmd+K no macOS) abre a Command Palette.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // `metaKey` cobre o Cmd do macOS, que e o atalho que o usuario espera
@@ -74,7 +59,7 @@ export function AppLayout() {
         event.preventDefault();
         // Abre em vez de alternar: com um modal ja aberto, alternar fechava
         // o dialogo e deixava o operador onde estava, sem feedback nenhum.
-        setShortcutsOpen(true);
+        setCommandPaletteOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -264,9 +249,9 @@ export function AppLayout() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => setShortcutsOpen(true)}
-              title="Atalhos de teclado (Ctrl+K)"
-              aria-label="Atalhos de teclado"
+              onClick={() => setCommandPaletteOpen(true)}
+              title="Command Palette (Ctrl+K)"
+              aria-label="Command Palette"
             >
               <Keyboard className="h-4 w-4" aria-hidden />
             </Button>
@@ -278,7 +263,7 @@ export function AppLayout() {
         </main>
       </div>
 
-      <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <CommandPalette open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)} />
     </div>
   );
 }
@@ -360,56 +345,3 @@ function ThemeToggle() {
 /* ---------------- Atalhos ---------------- */
 
 /* Atalhos globais e atalhos que valem apenas dentro do PDV. */
-const SHORTCUTS: { keys: string[]; action: string; scope?: string; permission?: Permission }[] = [
-  { keys: ['Ctrl', 'K'], action: 'Abrir esta lista' },
-  { keys: ['Esc'], action: 'Fechar janela atual' },
-  { keys: ['F2'], action: 'Iniciar nova venda', scope: 'PDV', permission: 'sales:create' },
-  { keys: ['F4'], action: 'Abrir pagamento', scope: 'PDV', permission: 'sales:create' },
-  { keys: ['F8'], action: 'Esvaziar carrinho', scope: 'PDV', permission: 'sales:create' },
-  { keys: ['F9'], action: 'Abrir caixa', scope: 'PDV', permission: 'sales:create' },
-];
-
-function ShortcutsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { can } = useAuth();
-
-  /**
-   * Usa o `Modal` compartilhado em vez de um dialogo proprio. A versao
-   * anterior anunciava "Esc fecha a janela" na propria lista de atalhos e nao
-   * tratava Escape - so fechava pelo fundo, pelo X ou por um segundo Ctrl+K.
-   * O Modal compartilhado ainda traz foco preso, retorno de foco e trava de
-   * scroll de graca.
-   */
-  return (
-    <Modal open={open} onClose={onClose} title="Atalhos de teclado" size="sm">
-      <ul className="divide-y divide-border">
-        {SHORTCUTS.filter((s) => !s.permission || can(s.permission)).map((shortcut) => (
-          <li key={shortcut.action} className="flex items-center justify-between py-2">
-            <span className="flex items-center gap-2 text-sm">
-              <BookOpen className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
-              {shortcut.action}
-              {shortcut.scope && (
-                <Badge tone="muted" className="ml-1">
-                  {shortcut.scope}
-                </Badge>
-              )}
-            </span>
-            <span className="flex gap-1">
-              {shortcut.keys.map((key) => (
-                <kbd
-                  key={key}
-                  className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold"
-                >
-                  {key}
-                </kbd>
-              ))}
-            </span>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-3 text-xs text-muted-foreground">
-        O leitor de codigo de barras funciona automaticamente: basta bipar com o leitor conectado
-        enquanto o PDV estiver aberto.
-      </p>
-    </Modal>
-  );
-}

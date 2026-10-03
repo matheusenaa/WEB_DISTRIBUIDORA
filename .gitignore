@@ -6,6 +6,13 @@ build/
 coverage/
 *.tsbuildinfo
 
+# Rust / Tauri - artefatos de compilacao
+target/
+# Sidecar gerado por `npm run sidecar:build`
+apps/desktop/src-tauri/binaries/
+# Instaladores gerados por `npm run tauri:build`
+release/
+
 .env
 .env.local
 .env.*.local

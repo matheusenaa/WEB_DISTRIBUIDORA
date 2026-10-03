@@ -4,7 +4,9 @@
   "version": "1.0.0",
   "identifier": "br.com.webdistribuidora.app",
   "build": {
-    "frontendDist": "../../web/dist"
+    "frontendDist": "../../web/dist",
+    "beforeBuildCommand": "",
+    "beforeDevCommand": ""
   },
   "app": {
     "windows": [
@@ -41,6 +43,11 @@
         "languages": ["PortugueseBR"],
         "displayLanguageSelector": false
       }
-    }
+    },
+    "resources": [
+      "binaries/api-sidecar.js",
+      "binaries/api-sidecar.bat",
+      "binaries/prisma/**/*"
+    ]
   }
 }

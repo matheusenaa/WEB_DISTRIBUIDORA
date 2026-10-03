@@ -34,10 +34,15 @@
     "build:shared": "npm run build -w @webdist/shared",
     "build:desktop": "npm run build -w @webdist/desktop",
     "tauri:dev": "npm run tauri dev -w @webdist/desktop",
-    "tauri:build": "npm run tauri build -w @webdist/desktop"
+    "tauri:build": "npm run tauri build -w @webdist/desktop",
+    "sidecar:build": "node scripts/build-sidecar.mjs",
+    "sidecar:dev": "npm run dev:api"
   },
   "devDependencies": {
+    "@vercel/ncc": "^0.45.0",
     "concurrently": "^9.1.0",
+    "nexe": "^5.0.0-beta.4",
+    "pkg": "^5.8.1",
     "typescript": "^5.7.2",
     "vite": "^6.4.3",
     "vitest": "^3.2.4"
