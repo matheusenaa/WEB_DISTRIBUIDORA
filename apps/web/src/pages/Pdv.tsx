@@ -170,7 +170,15 @@ export function PdvPage() {
     setLines((current) => current.filter((line) => line.productId !== productId));
   }, []);
 
-  const clearCart = useCallback(() => setLines([]), []);
+  const clearCart = useCallback(() => {
+    if (lines.length === 0) {
+      setLines([]);
+      return;
+    }
+    if (confirm('Limpar todo o carrinho? Esta ação não pode ser desfeita.')) {
+      setLines([]);
+    }
+  }, [lines.length]);
 
   /* ---------------- Busca ---------------- */
 
@@ -691,6 +699,11 @@ function PaymentModal({
       .get<{ data: { id: number; name: string }[] }>('/api/customers', { perPage: 200, active: true })
       .then((result) => setCustomers(result.data ?? []))
       .catch(() => setCustomers([]));
+    setTimeout(() => {
+      const input = document.getElementById('valor-recebido') as HTMLInputElement | null;
+      input?.focus();
+      input?.select();
+    }, 100);
   }, [open, totals.total]);
 
   const submit = async () => {
@@ -902,7 +915,7 @@ function PaymentModal({
             >
               <div className="relative">
                 <Input
-                  id="pay-amount"
+                  id="valor-recebido"
                   value={amountText}
                   onChange={(event) => setAmountText(event.target.value)}
                   inputMode="decimal"

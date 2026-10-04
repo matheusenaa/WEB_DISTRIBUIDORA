@@ -13,9 +13,15 @@ export function CustomersPage() {
         icon: Users,
         canManage: 'customers:manage',
         primary: (row) => row.name,
-        secondary: (row) =>
-          [row.document, row.phone, row.email].filter(Boolean).join(' - ') ||
-          `Cadastrado em ${dateOnly(row.createdAt)}`,
+        secondary: (row) => {
+          const base = [row.document, row.phone, row.email].filter(Boolean).join(' - ');
+          if (base) return base;
+          try {
+            return `Cadastrado em ${dateOnly(row.createdAt)}`;
+          } catch {
+            return 'Cadastrado em -';
+          }
+        },
         fields: [
           { name: 'name', label: 'Nome / razao social', required: true, full: true },
           { name: 'document', label: 'CNPJ / CPF', placeholder: '00.000.000/0000-00' },

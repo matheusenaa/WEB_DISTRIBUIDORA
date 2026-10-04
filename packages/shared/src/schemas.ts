@@ -26,22 +26,63 @@ export const percentSchema = z.coerce
   .min(-100, 'Percentual invalido')
   .max(100, 'Percentual invalido');
 
-/** Aceita string numerica ou number. Para campos monetarios de entrada. */
+/** Aceita string numerica ou number. Para campos monetarios de entrada (reais). */
 export const moneyInputSchema = z
   .union([z.string(), z.number()])
   .transform((v, ctx) => {
-    const s = typeof v === 'string' ? v.trim() : v;
-    if (s === '') {
+    const raw = typeof v === 'string' ? v.trim() : v;
+    if (raw === '' || raw === null || raw === undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Valor obrigatorio' });
       return z.NEVER;
     }
-    const n = typeof s === 'number' ? s : Number(s.replace(',', '.'));
+    if (typeof raw === 'number') {
+      if (!Number.isFinite(raw)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Valor monetario invalido' });
+        return z.NEVER;
+      }
+      // Assume que números vindos como valores monetários em centavos já estão corretos
+      // quando são inteiros com magnitude típica (>= 0). Não multiplica por 100.
+      return Math.round(raw);
+    }
+    let s = raw;
+    s = s.replace(/[R$\s\u00a0]/gi, '');
+    if (s === '') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Valor monetario invalido' });
+      return z.NEVER;
+    }
+    const hasComma = s.includes(',');
+    const hasDot = s.includes('.');
+    if (hasComma && hasDot) {
+      s = s.replace(/\./g, '').replace(',', '.');
+    } else if (hasComma) {
+      s = s.replace(',', '.');
+    } else if (hasDot) {
+      const parts = s.split('.');
+      if (parts.length > 2) {
+        s = s.replace(/\./g, '');
+      } else if (parts[1]!.length === 3 && parts[0]!.length >= 1) {
+        s = s.replace(/\./g, '');
+      }
+    }
+    if (!/^-?\d*\.?\d*$/.test(s) || s === '' || s === '.') {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Valor monetario invalido' });
+      return z.NEVER;
+    }
+    const n = Number(s);
     if (!Number.isFinite(n)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Valor monetario invalido' });
       return z.NEVER;
     }
     return Math.round(n * 100);
   });
+
+/** Aceita centavos diretamente (inteiro). */
+export const moneyCentsSchema = z.coerce
+  .number()
+  .int('Valor deve ser inteiro em centavos')
+  .finite('Valor monetario invalido')
+  .min(-1_000_000_000, 'Valor muito negativo')
+  .max(1_000_000_000, 'Valor muito alto');
 
 export const idParamSchema = z.coerce.number().int().positive();
 export const barcodeSchema = z

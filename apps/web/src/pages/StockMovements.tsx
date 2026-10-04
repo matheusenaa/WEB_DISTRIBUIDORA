@@ -3,6 +3,7 @@ import {
   STOCK_MOVEMENT_TYPES,
   type StockMovementDTO,
   type StockMovementType,
+  parseMoneyToCents,
 } from '@webdist/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeftRight, Plus, Sliders } from 'lucide-react';
@@ -388,7 +389,7 @@ function MovementModal({
         quantity: qtyValue,
         reason: reason.trim(),
         documentNumber: documentNumber.trim() || undefined,
-        unitCost: isEntry && unitCost.trim() ? Number(unitCost) : undefined,
+        unitCost: isEntry && unitCost.trim() ? parseMoneyToCents(unitCost) ?? undefined : undefined,
       });
       toast.success('Movimentacao registrada.');
       setProduct(null);

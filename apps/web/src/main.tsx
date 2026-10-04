@@ -7,6 +7,7 @@ import { App } from './App';
 import { AuthProvider } from './lib/auth';
 import { initTheme, ThemeProvider } from './lib/theme';
 import { ApiError } from './lib/api';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import './index.css';
 
 // Antes do primeiro render: evita o flash de tema claro em quem escolheu o
@@ -37,7 +38,9 @@ createRoot(container).render(
       <BrowserRouter>
         <ThemeProvider>
           <AuthProvider>
-            <App />
+            <ErrorBoundary>
+              <App />
+            </ErrorBoundary>
             <Toaster
               position="top-right"
               richColors
