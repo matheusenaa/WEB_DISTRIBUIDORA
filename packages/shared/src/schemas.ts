@@ -328,7 +328,7 @@ export type PurchaseItemInput = z.infer<typeof purchaseItemSchema>;
 
 export const purchaseCreateSchema = z
   .object({
-    supplierId: z.coerce.number().int().positive('Selecione o fornecedor'),
+    supplierId: z.coerce.number().int().positive('Selecione o fornecedor').optional().nullable(),
     items: z.array(purchaseItemSchema).min(1, 'Adicione ao menos um item'),
     documentNumber: z.string().trim().max(60).optional().or(z.literal('')),
     notes: z.string().trim().max(600).optional().or(z.literal('')),

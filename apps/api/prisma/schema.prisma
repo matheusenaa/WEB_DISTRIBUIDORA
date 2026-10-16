@@ -240,7 +240,7 @@ model StockMovement {
 model PurchaseOrder {
   id             Int       @id @default(autoincrement())
   number         Int       @unique
-  supplierId     Int
+  supplierId     Int?
   userId         Int
   status         String    @default("ABERTO") // ABERTO | RECEBIDO | CANCELADO
   /// Numero da nota fiscal do fornecedor (documento do XML/DANFE).
@@ -251,7 +251,7 @@ model PurchaseOrder {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  supplier Supplier        @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  supplier Supplier?       @relation(fields: [supplierId], references: [id], onDelete: Restrict)
   user     User            @relation(fields: [userId], references: [id], onDelete: Restrict)
   items    PurchaseItem[]
   movements StockMovement[]

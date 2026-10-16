@@ -385,8 +385,8 @@ export interface PurchaseItemDTO {
 export interface PurchaseOrderDTO {
   id: number;
   number: number;
-  supplierId: number;
-  supplierName: string;
+  supplierId: number | null;
+  supplierName: string | null;
   userId: number;
   userName: string;
   status: PurchaseStatus;

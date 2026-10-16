@@ -81,8 +81,6 @@ const VENDEDOR_PERMISSIONS: Permission[] = [
   'cash:close',
   'cash:read',
   'cash:withdraw',
-  // O dashboard do vendedor e escopado as proprias vendas pelo backend.
-  'dashboard:read',
 ];
 
 const ADMIN_PERMISSIONS: Permission[] = [...PERMISSIONS];

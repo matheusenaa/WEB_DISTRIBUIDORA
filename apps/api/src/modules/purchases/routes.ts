@@ -55,7 +55,7 @@ function toOrderDTO(order: OrderWithItems): PurchaseOrderDTO {
     id: order.id,
     number: order.number,
     supplierId: order.supplierId,
-    supplierName: order.supplier.name,
+    supplierName: order.supplier?.name ?? null,
     userId: order.userId,
     userName: order.user.name,
     status: order.status as PurchaseStatus,
@@ -135,13 +135,16 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
     const actor = request.currentUser as AuthUser;
     const input = purchaseCreateSchema.parse(request.body);
 
-    const supplier = await prisma.supplier.findUnique({
-      where: { id: input.supplierId },
-      select: { id: true, name: true, active: true },
-    });
-    if (!supplier) throw new AppError('NOT_FOUND', 'Fornecedor nao encontrado.');
-    if (!supplier.active) {
-      throw new AppError('CONFLICT', `O fornecedor "${supplier.name}" esta inativo.`);
+    let supplier: { id: number; name: string; active: boolean } | null = null;
+    if (input.supplierId) {
+      supplier = await prisma.supplier.findUnique({
+        where: { id: input.supplierId },
+        select: { id: true, name: true, active: true },
+      });
+      if (!supplier) throw new AppError('NOT_FOUND', 'Fornecedor nao encontrado.');
+      if (!supplier.active) {
+        throw new AppError('CONFLICT', `O fornecedor "${supplier.name}" esta inativo.`);
+      }
     }
 
     const productIds = input.items.map((i) => i.productId);
@@ -166,7 +169,7 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
         const created = await tx.purchaseOrder.create({
           data: {
             number,
-            supplierId: supplier.id,
+            supplierId: supplier?.id ?? null,
             userId: actor.id,
             status: input.receiveNow ? 'RECEBIDO' : 'ABERTO',
             documentNumber: input.documentNumber || null,
@@ -184,7 +187,7 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
             },
           },
           select: { id: true, number: true },
-        });
+        } as any);
 
         if (input.receiveNow) {
           await receiveItems(tx, {
@@ -211,7 +214,7 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
       action: 'CREATE',
       entity: 'PurchaseOrder',
       entityId: order.id,
-      description: `${actor.name} criou o pedido de compra #${order.number} para "${supplier.name}" (${dto.itemsCount} itens, ${input.receiveNow ? 'recebido' : 'em aberto'})`,
+      description: `${actor.name} criou o pedido de compra #${order.number} para "${supplier?.name ?? 'Fornecedor não informado'}" (${dto.itemsCount} itens, ${input.receiveNow ? 'recebido' : 'em aberto'})`,
       after: dto,
       request,
     });
