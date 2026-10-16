@@ -58,17 +58,21 @@ const raw = parsed.data;
 
 /**
  * No sidecar do Tauri o codigo vive em `Program Files` (somente leitura) e o
- * banco em `%APPDATA%`. O Prisma resolve um `file:./x.db` relativo ao
- * schema.prisma, que dentro do bundle fica em `binaries/api/prisma` — ou
- * seja, abriria um banco vazio em vez do banco do usuario. Convertemos para
- * caminho absoluto antes de o cliente ser criado.
+ * banco em `%LOCALAPPDATA%\WEB DISTRIBUIDORA\data`. O Prisma resolve um
+ * `file:./x.db` relativo ao schema.prisma, que dentro do bundle fica em
+ * `binaries/api/prisma` — ou seja, abriria um banco vazio em vez do banco do
+ * usuario. Convertemos para caminho absoluto antes de o cliente ser criado.
+ *
+ * Preferimos `LOCALAPPDATA` a `APPDATA`: o perfil movel (Roaming) sincroniza
+ * entre maquinas em ambiente de dominio e um SQLite sincronizado corrompe.
  */
 function resolveDatabaseUrl(url: string): string {
   if (!url.startsWith('file:')) return url;
   const target = url.slice('file:'.length);
   if (path.isAbsolute(target)) return url;
   if (process.env.TAURI_SIDECAR !== 'true') return url;
-  const base = process.env.APPDATA || process.env.HOME || homedir();
+  const base =
+    process.env.LOCALAPPDATA || process.env.APPDATA || process.env.HOME || homedir();
   const absolute = path.resolve(base, 'WEB DISTRIBUIDORA', target);
   return `file:${absolute.replace(/\\/g, '/')}`;
 }

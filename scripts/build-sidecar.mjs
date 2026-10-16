@@ -209,12 +209,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(process.env.APPDATA || homedir(), 'WEB DISTRIBUIDORA');
+// LOCALAPPDATA (nao Roaming): em dominio o APPDATA sincroniza entre maquinas e
+// um SQLite sincronizado corrompe. Aqui ficam dados, logs, .env e backups.
+const baseDir = join(process.env.LOCALAPPDATA || process.env.APPDATA || homedir(), 'WEB DISTRIBUIDORA');
+const dataDir = join(baseDir, 'data');
+const logsDir = join(baseDir, 'logs');
 mkdirSync(dataDir, { recursive: true });
+mkdirSync(logsDir, { recursive: true });
 
 // O Tauri nao captura a saida do sidecar, entao tudo vai para um arquivo em
 // disco: sem isso nao ha como diagnosticar a falha em uma maquina nova.
-const logPath = join(dataDir, 'sidecar.log');
+const logPath = join(logsDir, 'sidecar.log');
 function log(line) {
   try {
     appendFileSync(logPath, \`[\${new Date().toISOString()}] \${line}\\n\`);
@@ -237,12 +242,12 @@ try {
 async function main() {
 
 // Segredos por maquina: nunca versionados, gerados apenas no primeiro boot.
-const envPath = join(dataDir, '.env');
+const envPath = join(baseDir, '.env');
 if (!existsSync(envPath)) {
   writeFileSync(
     envPath,
     [
-      'DATABASE_URL=file:./dev.db',
+      'DATABASE_URL=file:./data/dev.db',
       \`JWT_SECRET=\${randomBytes(48).toString('base64url')}\`,
       \`REFRESH_TOKEN_PEPPER=\${randomBytes(32).toString('base64url')}\`,
       '',

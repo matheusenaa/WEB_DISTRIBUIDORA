@@ -67,17 +67,9 @@ export function parseMoneyToCents(input: string | number | null | undefined): nu
   return Math.round(value * 100);
 }
 
-/** Converte reais para centavos. Para valores já em centavos, arredonda. */
+/** Arredonda para inteiro (protege contra resumos de matematica discreta). */
 export function toCents(value: number): number {
   if (!Number.isFinite(value)) return 0;
-  // Heurística: se parece já estar em centavos (inteiro >= 100 ou tem magnitude grande)
-  // mas melhor: detectar - se for inteiro e o valor for >= 100 e < 10^9, assumir centavos
-  // quando vem de cálculos internos? Mas para segurança, se for fracionário assume reais
-  if (!Number.isInteger(value)) {
-    return Math.round(value * 100);
-  }
-  // Inteiro: valores pequenos (0-99) são provavelmente reais*100 incorretamente? Não.
-  // Mas para evitar ambiguidade, use parseMoneyToCents para strings.
   return Math.round(value);
 }
 

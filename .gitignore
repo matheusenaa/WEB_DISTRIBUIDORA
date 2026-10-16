@@ -12,6 +12,8 @@ target/
 apps/desktop/src-tauri/binaries/
 # Instaladores gerados por `npm run tauri:build`
 release/
+# Pacote de entrega (instalador + relatorios)
+dist-installer/
 
 .env
 .env.local

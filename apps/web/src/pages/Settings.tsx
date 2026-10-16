@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Save, Settings as SettingsIcon, RotateCcw } from 'lucide-react';
+import { Save, Settings as SettingsIcon, RotateCcw, Database, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import type { SettingDTO, SettingGroup } from '@webdist/shared';
-import { Badge, Card, CardContent, CardHeader } from '@/components/ui';
+import { Badge, Card, CardContent, CardHeader, ConfirmDialog } from '@/components/ui';
 import { Button } from '@/components/ui/button';
 import { Field, FormError, Input, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
@@ -239,6 +239,8 @@ export function SettingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <BackupPanel canManage={!readOnly} />
     </div>
   );
 }
@@ -337,5 +339,232 @@ function SettingField({
         <span className="block text-xs text-accent">Alterado, ainda nao salvo.</span>
       )}
     </Field>
+  );
+}
+
+interface BackupItem {
+  name: string;
+  size: string;
+  date: string;
+  kind: string | null;
+  status: string | null;
+  note: string | null;
+  userName: string | null;
+  missing?: boolean;
+}
+
+const BACKUP_KIND_LABELS: Record<string, string> = {
+  MANUAL: 'Manual',
+  AUTOMATICO: 'Automatico',
+  PRE_RESTORE: 'Seguranca (pre-restore)',
+};
+
+const BACKUP_STATUS_LABELS: Record<string, string> = {
+  VALIDO: 'Valido',
+  RESTAURADO: 'Restaurado',
+  CORROMPIDO: 'Corrompido',
+};
+
+function formatBackupDate(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString('pt-BR');
+}
+
+/**
+ * BACKUP / RESTAURACAO
+ *
+ * A API ja implementa o ciclo completo (VACUUM INTO, checksum, registro no
+ * banco, backup de seguranca antes do restore e aplicacao no proximo start).
+ * Faltava a tela: o menu de comandos mandava para Configuracoes, mas nao
+ * havia como criar ou restaurar backup no app instalado.
+ *
+ * O restore nao e aplicado na hora: a API deixa um arquivo "pending" e o
+ * proximo start conclui com as migracoes. Por isso avisamos o usuario a
+ * fechar e reabrir o programa.
+ */
+function BackupPanel({ canManage }: { canManage: boolean }) {
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState<{ action: 'restore' | 'delete'; item: BackupItem } | null>(
+    null,
+  );
+
+  const backupsQuery = useQuery({
+    queryKey: ['backups'],
+    queryFn: () => api.get<{ data: BackupItem[]; orphans?: BackupItem[] }>('/api/backup'),
+  });
+
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ['backups'] });
+  const fail = (caught: unknown, fallback: string) =>
+    toast.error(caught instanceof ApiError ? caught.message : fallback);
+
+  const createMutation = useMutation({
+    mutationFn: () => api.post<{ ok: boolean; message: string }>('/api/backup'),
+    onSuccess: (result) => {
+      toast.success(result.message);
+      invalidate();
+    },
+    onError: (caught) => fail(caught, 'Nao foi possivel criar o backup.'),
+  });
+
+  const restoreMutation = useMutation({
+    mutationFn: (fileName: string) =>
+      api.post<{ ok: boolean; message: string }>('/api/restore', { fileName }),
+    onSuccess: (result) => {
+      setPending(null);
+      toast.success(result.message, { duration: 12000 });
+      invalidate();
+    },
+    onError: (caught) => {
+      setPending(null);
+      fail(caught, 'Nao foi possivel preparar a restauracao.');
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (fileName: string) =>
+      api.delete<{ ok: boolean; message: string }>(`/api/backup/${encodeURIComponent(fileName)}`),
+    onSuccess: (result) => {
+      setPending(null);
+      toast.success(result.message);
+      invalidate();
+    },
+    onError: (caught) => {
+      setPending(null);
+      fail(caught, 'Nao foi possivel excluir o backup.');
+    },
+  });
+
+  const items = backupsQuery.data?.data ?? [];
+  const orphans = backupsQuery.data?.orphans ?? [];
+  const busy =
+    createMutation.isPending || restoreMutation.isPending || deleteMutation.isPending;
+
+  return (
+    <Card>
+      <CardHeader
+        title="Backup e restauracao"
+        description="Copias de seguranca do banco de dados local. Guardadas na pasta de dados do usuario."
+        action={
+          canManage ? (
+            <Button
+              onClick={() => createMutation.mutate()}
+              loading={createMutation.isPending}
+              disabled={createMutation.isPending || restoreMutation.isPending}
+            >
+              <Database className="h-4 w-4" aria-hidden />
+              Criar backup
+            </Button>
+          ) : undefined
+        }
+      />
+      <CardContent className="space-y-3">
+        {backupsQuery.isLoading && (
+          <p className="text-sm text-muted-foreground" role="status">
+            Carregando backups...
+          </p>
+        )}
+
+        {backupsQuery.isError && (
+          <p className="text-sm text-destructive">
+            Nao foi possivel listar os backups.
+          </p>
+        )}
+
+        {!backupsQuery.isLoading && items.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            Nenhum backup ainda. Use "Criar backup" para gerar a primeira copia de seguranca.
+          </p>
+        )}
+
+        {items.map((item) => (
+          <div
+            key={item.name}
+            className="flex flex-wrap items-center gap-2 rounded-md border border-border p-3"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-xs text-foreground">{item.name}</p>
+              <p className="text-xs text-muted-foreground">
+                {formatBackupDate(item.date)} - {item.size}
+                {item.userName ? ` - por ${item.userName}` : ''}
+              </p>
+            </div>
+            {item.kind && (
+              <Badge tone={item.kind === 'PRE_RESTORE' ? 'accent' : 'muted'}>
+                {BACKUP_KIND_LABELS[item.kind] ?? item.kind}
+              </Badge>
+            )}
+            {item.status && item.status !== 'VALIDO' && (
+              <Badge tone="muted">{BACKUP_STATUS_LABELS[item.status] ?? item.status}</Badge>
+            )}
+            {canManage && (
+              <>
+                <Button
+                  variant="secondary"
+                  onClick={() => setPending({ action: 'restore', item })}
+                  disabled={busy}
+                >
+                  <RotateCcw className="h-4 w-4" aria-hidden />
+                  Restaurar
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={() => setPending({ action: 'delete', item })}
+                  disabled={busy || item.kind === 'PRE_RESTORE'}
+                  title={
+                    item.kind === 'PRE_RESTORE'
+                      ? 'Backup de seguranca do ultimo restore nao pode ser excluido.'
+                      : undefined
+                  }
+                >
+                  <Trash2 className="h-4 w-4" aria-hidden />
+                  Excluir
+                </Button>
+              </>
+            )}
+          </div>
+        ))}
+
+        {orphans.length > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {orphans.length} registro(s) de backup sem arquivo correspondente no disco.
+          </p>
+        )}
+
+        {canManage && (
+          <p className="text-xs text-muted-foreground">
+            Restaurar prepara a troca; a restauracao e concluida ao fechar e reabrir o programa.
+            Um backup de seguranca do banco atual e criado automaticamente antes.
+          </p>
+        )}
+      </CardContent>
+
+      <ConfirmDialog
+        open={pending != null}
+        onClose={() => setPending(null)}
+        onConfirm={() => {
+          if (!pending) return;
+          if (pending.action === 'restore') restoreMutation.mutate(pending.item.name);
+          else deleteMutation.mutate(pending.item.name);
+        }}
+        destructive={pending?.action === 'delete'}
+        loading={restoreMutation.isPending || deleteMutation.isPending}
+        title={pending?.action === 'restore' ? 'Restaurar backup' : 'Excluir backup'}
+        confirmLabel={pending?.action === 'restore' ? 'Restaurar' : 'Excluir'}
+        message={
+          pending?.action === 'restore' ? (
+            <>
+              Restaurar <span className="font-mono text-xs">{pending?.item.name}</span>?
+              <br />O banco atual sera substituido quando o programa for reiniciado. Um backup de
+              seguranca do estado atual sera criado antes.
+            </>
+          ) : (
+            <>
+              Excluir <span className="font-mono text-xs">{pending?.item.name}</span>? Esta acao nao
+              pode ser desfeita.
+            </>
+          )
+        }
+      />
+    </Card>
   );
 }

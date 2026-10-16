@@ -78,9 +78,13 @@ pub fn run() {
 }
 
 /// Pasta de dados do usuario: banco, `.env`, backups e logs.
+///
+/// `LOCALAPPDATA` (nao `APPDATA`/Roaming): em ambiente de dominio o perfil
+/// movel sincroniza entre maquinas e um SQLite sincronizado corrompe.
 #[cfg(desktop)]
 fn data_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA")
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
         .map(std::path::PathBuf::from)
         .map(|base| base.join("WEB DISTRIBUIDORA"))
 }
@@ -91,6 +95,7 @@ fn data_dir() -> Option<std::path::PathBuf> {
 fn log_line(message: &str) {
     use std::io::Write;
     if let Some(dir) = data_dir() {
+        let dir = dir.join("logs");
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
@@ -342,7 +347,7 @@ fn stop_api_sidecar(handle: &tauri::AppHandle) {
     let Ok(mut guard) = sidecar.child.lock() else {
         return;
     };
-    let Some(mut child) = guard.take() else {
+    let Some(child) = guard.take() else {
         return;
     };
 
@@ -358,7 +363,10 @@ fn stop_api_sidecar(handle: &tauri::AppHandle) {
         .and_then(|mut kill| kill.wait());
 
     #[cfg(not(windows))]
-    let _ = child.kill();
+    {
+        let mut child = child;
+        let _ = child.kill();
+    }
 
     // Fechar o Job Object tambem derruba a arvore, como rede de seguranca
     // para o caso de o `taskkill` falhar.

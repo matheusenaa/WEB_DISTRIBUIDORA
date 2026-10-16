@@ -286,7 +286,7 @@ export async function registerPurchaseRoutes(app: FastifyInstance): Promise<void
       action: 'STOCK_RECEIVE',
       entity: 'PurchaseOrder',
       entityId: order.id,
-      description: `${actor.name} recebeu o pedido #${order.number} de "${order.supplier.name}"`,
+      description: `${actor.name} recebeu o pedido #${order.number} de "${order.supplier?.name ?? 'fornecedor nao informado'}"`,
       after: dto,
       request,
     });
@@ -422,7 +422,7 @@ async function receiveItems(
     where: { id: params.orderId },
     select: { supplierId: true },
   });
-  if (order && touchedProducts.size > 0) {
+  if (order && order.supplierId != null && touchedProducts.size > 0) {
     const lastPaid = await tx.stockMovement.findFirst({
       where: { purchaseOrderId: params.orderId, unitCost: { not: null } },
       orderBy: { id: 'desc' },

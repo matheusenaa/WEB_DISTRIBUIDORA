@@ -335,7 +335,7 @@ export async function registerStockRoutes(app: FastifyInstance): Promise<void> {
         id: order.id,
         number: order.number,
         supplierId: order.supplierId,
-        supplierName: order.supplier.name,
+        supplierName: order.supplier?.name ?? null,
         status: order.status,
         itemsCount: order.items.length,
         totalQuantity: order.items.reduce((sum, i) => sum + i.quantity, 0),
