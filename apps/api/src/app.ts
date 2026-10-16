@@ -25,6 +25,25 @@ import {
   registerCustomerRoutes,
 } from './modules/catalog/routes.js';
 
+/**
+ * Reconhece origins de ambiente local/dev sem confiar em lista fixa de portas:
+ *  - Vite/qualquer porta em http(s)://localhost: / http(s)://127.0.0.1:
+ *  - origins do Tauri (`tauri://localhost`, `http://tauri.localhost`)
+ *
+ * Um site externo nunca tem origin localhost, entao liberar isso nao amplia
+ * a superficie de ataque.
+ */
+function isLocalDevOrigin(origin: string): boolean {
+  if (origin === 'tauri://localhost' || origin === 'http://tauri.localhost') return true;
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     // Trust proxy: necessario para que o rate limit por IP e o log usem o IP
@@ -61,7 +80,16 @@ export async function buildApp(): Promise<FastifyInstance> {
       // Sem Origin = chamada nao vinda de navegador (health check, curl, app desktop).
       if (!origin) return cb(null, true);
       if (config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)) return cb(null, true);
-      cb(new Error('Origem nao autorizada'), false);
+      // Desenvolvimento/local: o frontend roda no Vite numa porta qualquer e o
+      // app desktop carrega de um origin proprio. Aceitar qualquer porta em
+      // localhost/127.0.0.1 (e os origins do Tauri) evita que a porta do Vite
+      // mude e derrube o login. Um site externo nunca tem origin localhost,
+      // entao isso nao amplia a superficie de ataque.
+      if (isLocalDevOrigin(origin)) return cb(null, true);
+      // Origem nao autorizada: responde sem cabecalho CORS (o navegador
+      // bloqueia), em vez de lancar erro - lancar aqui virava HTTP 500 e
+      // escondia a causa real.
+      cb(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
