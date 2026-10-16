@@ -76,6 +76,34 @@ function toSessionDTO(row: SessionRow, totals?: {
   };
 }
 
+type MovementRow = {
+  id: number;
+  type: string;
+  kind: string;
+  amountCents: number;
+  description: string;
+  saleId: number | null;
+  userId: number;
+  createdAt: Date;
+  sale?: { number: number } | null;
+  user?: { name: string } | null;
+};
+
+function toMovementDTO(m: MovementRow): CashMovementDTO {
+  return {
+    id: m.id,
+    type: m.type as CashMovementDTO['type'],
+    kind: m.kind,
+    amountCents: m.amountCents,
+    description: m.description,
+    saleId: m.saleId,
+    saleNumber: m.sale?.number ?? null,
+    userId: m.userId,
+    userName: m.user?.name ?? 'Removido',
+    createdAt: m.createdAt.toISOString(),
+  };
+}
+
 export async function registerCashRoutes(app: FastifyInstance): Promise<void> {
   /* ---------------------------------------------------------------- */
   /* GET /api/cash/current - sessao aberta                            */
@@ -86,7 +114,13 @@ export async function registerCashRoutes(app: FastifyInstance): Promise<void> {
     const open = await prisma.cashSession.findFirst({
       where: { status: 'ABERTO' },
       orderBy: { openedAt: 'desc' },
-      include: sessionInclude,
+      include: {
+        ...sessionInclude,
+        movements: {
+          orderBy: { createdAt: 'asc' },
+          include: { sale: { select: { number: true } }, user: { select: { name: true } } },
+        },
+      },
     });
     if (!open) return { session: null, message: 'Nenhum caixa aberto.' };
 
@@ -96,7 +130,10 @@ export async function registerCashRoutes(app: FastifyInstance): Promise<void> {
     void actor;
 
     return {
-      session: toSessionDTO(open, totals),
+      session: {
+        ...toSessionDTO(open, totals),
+        movements: open.movements.map(toMovementDTO),
+      },
       expectedAmountCents:
         open.initialAmountCents + totals.entriesTotalCents - totals.exitsTotalCents,
     };
@@ -217,18 +254,7 @@ export async function registerCashRoutes(app: FastifyInstance): Promise<void> {
     const totals = await computeTotals(session.id);
     const base = toSessionDTO(session, totals);
 
-    const movements: CashMovementDTO[] = session.movements.map((m) => ({
-      id: m.id,
-      type: m.type as CashMovementDTO['type'],
-      kind: m.kind,
-      amountCents: m.amountCents,
-      description: m.description,
-      saleId: m.saleId,
-      saleNumber: m.sale?.number ?? null,
-      userId: m.userId,
-      userName: m.user?.name ?? 'Removido',
-      createdAt: m.createdAt.toISOString(),
-    }));
+    const movements: CashMovementDTO[] = session.movements.map(toMovementDTO);
 
     return {
       ...base,

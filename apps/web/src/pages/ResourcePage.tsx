@@ -83,7 +83,7 @@ export function ResourcePage<T extends ResourceRow>({ config }: { config: Resour
   const listQuery = useQuery({
     queryKey: ['resource', config.path, page, debouncedSearch, showInactive],
     queryFn: () =>
-      api.get<{ data: T[]; pagination: { page: number; totalPages: number; total: number } }>(
+      api.get<{ data: T[]; pagination?: { page: number; totalPages: number; total: number } }>(
         config.path,
         {
           page,
@@ -176,7 +176,7 @@ const openCreate = () => {
       <Card>
         <CardHeader
           title={config.title}
-          description={`${listQuery.data?.pagination.total ?? 0} registro(s)`}
+          description={`${listQuery.data?.pagination?.total ?? rows.length} registro(s)`}
           action={
             <div className="flex flex-wrap items-center gap-2">
               <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
@@ -220,7 +220,7 @@ const openCreate = () => {
               />
             }
           />
-          {listQuery.data && (
+          {listQuery.data?.pagination && (
             <Pagination
               page={listQuery.data.pagination.page}
               totalPages={listQuery.data.pagination.totalPages}

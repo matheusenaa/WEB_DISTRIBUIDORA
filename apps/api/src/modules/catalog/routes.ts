@@ -15,20 +15,78 @@ import type { AuthUser } from '../../plugins/auth.js';
 
 const idParam = z.object({ id: z.coerce.number().int().positive() });
 
+const activeFlag = z
+  .union([z.boolean(), z.string()])
+  .optional()
+  .transform((v) => (v === undefined ? undefined : v === true || v === 'true' || v === '1'));
+
+/**
+ * Query padrao das listagens de cadastro (categorias, marcas, fornecedores,
+ * clientes).
+ *
+ * A tela generica de cadastro envia `page`, `perPage`, `q` e `active`, mas as
+ * rotas antigas liam `search`/`includeInactive` e nao paginavam: a lista
+ * quebrava ao montar a paginacao e a busca / "mostrar inativos" nao faziam
+ * nada. Aqui aceitamos as duas grafias e devolvemos a paginacao esperada.
+ */
+const catalogListQuery = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  perPage: z.coerce.number().int().min(1).max(200).default(25),
+  q: z.string().trim().max(120).optional(),
+  search: z.string().trim().max(120).optional(),
+  active: activeFlag,
+  includeInactive: activeFlag,
+});
+
+interface CatalogListParams {
+  term: string;
+  /** true = so ativos, false = so inativos, undefined = todos. */
+  active: boolean | undefined;
+  page: number;
+  perPage: number;
+  skip: number;
+  take: number;
+}
+
+function parseCatalogList(raw: unknown): CatalogListParams {
+  const q = catalogListQuery.parse(raw ?? {});
+  return {
+    term: q.q || q.search || '',
+    // `includeInactive: true` forca "todos", vencendo o filtro `active`.
+    active: q.includeInactive ? undefined : q.active,
+    page: q.page,
+    perPage: q.perPage,
+    skip: (q.page - 1) * q.perPage,
+    take: q.perPage,
+  };
+}
+
+function buildPagination(page: number, perPage: number, total: number) {
+  return { page, perPage, total, totalPages: Math.max(1, Math.ceil(total / perPage)) };
+}
+
 /* ------------------------------------------------------------------ */
 /* Categorias                                                          */
 /* ------------------------------------------------------------------ */
 export async function registerCategoryRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', { preHandler: [app.requirePermission('categories:read')] }, async (request) => {
-    const query = z
-      .object({ includeInactive: z.coerce.boolean().optional() })
-      .parse(request.query ?? {});
+    const p = parseCatalogList(request.query);
 
-    const rows = await prisma.category.findMany({
-      where: query.includeInactive ? {} : { active: true },
-      orderBy: { name: 'asc' },
-      include: { _count: { select: { products: true } } },
-    });
+    const where = {
+      ...(p.active === undefined ? {} : { active: p.active }),
+      ...(p.term ? { name: { contains: p.term } } : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      prisma.category.count({ where }),
+      prisma.category.findMany({
+        where,
+        orderBy: { name: 'asc' },
+        skip: p.skip,
+        take: p.take,
+        include: { _count: { select: { products: true } } },
+      }),
+    ]);
 
     return {
       data: rows.map((c) => ({
@@ -39,6 +97,7 @@ export async function registerCategoryRoutes(app: FastifyInstance): Promise<void
         productCount: c._count.products,
         createdAt: c.createdAt.toISOString(),
       })),
+      pagination: buildPagination(p.page, p.perPage, total),
     };
   });
 
@@ -133,15 +192,23 @@ export async function registerCategoryRoutes(app: FastifyInstance): Promise<void
 /* ------------------------------------------------------------------ */
 export async function registerBrandRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', { preHandler: [app.requirePermission('brands:read')] }, async (request) => {
-    const query = z
-      .object({ includeInactive: z.coerce.boolean().optional() })
-      .parse(request.query ?? {});
+    const p = parseCatalogList(request.query);
 
-    const rows = await prisma.brand.findMany({
-      where: query.includeInactive ? {} : { active: true },
-      orderBy: { name: 'asc' },
-      include: { _count: { select: { products: true } } },
-    });
+    const where = {
+      ...(p.active === undefined ? {} : { active: p.active }),
+      ...(p.term ? { name: { contains: p.term } } : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      prisma.brand.count({ where }),
+      prisma.brand.findMany({
+        where,
+        orderBy: { name: 'asc' },
+        skip: p.skip,
+        take: p.take,
+        include: { _count: { select: { products: true } } },
+      }),
+    ]);
 
     return {
       data: rows.map((b) => ({
@@ -150,6 +217,7 @@ export async function registerBrandRoutes(app: FastifyInstance): Promise<void> {
         active: b.active,
         productCount: b._count.products,
       })),
+      pagination: buildPagination(p.page, p.perPage, total),
     };
   });
 
@@ -254,24 +322,29 @@ function toSupplierDTO(s: SupplierWithCount): SupplierDTO {
 
 export async function registerSupplierRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', { preHandler: [app.requirePermission('suppliers:read')] }, async (request) => {
-    const query = z
-      .object({
-        includeInactive: z.coerce.boolean().optional(),
-        search: z.string().trim().max(120).optional(),
-      })
-      .parse(request.query ?? {});
+    const p = parseCatalogList(request.query);
 
-    const rows = await prisma.supplier.findMany({
-      where: {
-        ...(query.includeInactive ? {} : { active: true }),
-        ...(query.search ? { OR: [{ name: { contains: query.search } }, { document: { contains: query.search } }] } : {}),
-      },
-      orderBy: { name: 'asc' },
-      include: { _count: { select: { products: true } } },
-    });
+    const where = {
+      ...(p.active === undefined ? {} : { active: p.active }),
+      ...(p.term
+        ? { OR: [{ name: { contains: p.term } }, { document: { contains: p.term } }] }
+        : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      prisma.supplier.count({ where }),
+      prisma.supplier.findMany({
+        where,
+        orderBy: { name: 'asc' },
+        skip: p.skip,
+        take: p.take,
+        include: { _count: { select: { products: true } } },
+      }),
+    ]);
 
     return {
       data: rows.map(toSupplierDTO),
+      pagination: buildPagination(p.page, p.perPage, total),
     };
   });
 
@@ -388,20 +461,24 @@ export async function registerSupplierRoutes(app: FastifyInstance): Promise<void
 /* ------------------------------------------------------------------ */
 export async function registerCustomerRoutes(app: FastifyInstance): Promise<void> {
   app.get('/', { preHandler: [app.requirePermission('customers:read')] }, async (request) => {
-    const query = z
-      .object({
-        includeInactive: z.coerce.boolean().optional(),
-        search: z.string().trim().max(120).optional(),
-      })
-      .parse(request.query ?? {});
+    const p = parseCatalogList(request.query);
 
-    const rows = await prisma.customer.findMany({
-      where: {
-        ...(query.includeInactive ? {} : { active: true }),
-        ...(query.search ? { OR: [{ name: { contains: query.search } }, { document: { contains: query.search } }] } : {}),
-      },
-      orderBy: { name: 'asc' },
-    });
+    const where = {
+      ...(p.active === undefined ? {} : { active: p.active }),
+      ...(p.term
+        ? { OR: [{ name: { contains: p.term } }, { document: { contains: p.term } }] }
+        : {}),
+    };
+
+    const [total, rows] = await Promise.all([
+      prisma.customer.count({ where }),
+      prisma.customer.findMany({
+        where,
+        orderBy: { name: 'asc' },
+        skip: p.skip,
+        take: p.take,
+      }),
+    ]);
 
     return {
       data: rows.map((c) => ({
@@ -414,6 +491,7 @@ export async function registerCustomerRoutes(app: FastifyInstance): Promise<void
         active: c.active,
         createdAt: c.createdAt.toISOString(),
       })),
+      pagination: buildPagination(p.page, p.perPage, total),
     };
   });
 

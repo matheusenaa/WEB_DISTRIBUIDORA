@@ -1,5 +1,5 @@
 import { PAYMENT_METHOD_LABELS, type SalePaymentMethod, type SalePaymentMethod as Method } from '@webdist/shared';
-import { applyPercentDiscount, marginFromPrice, parseMoneyToCents } from '@webdist/shared';
+import { applyPercentDiscount, parseMoneyToCents } from '@webdist/shared';
 import {
   AlertTriangle,
   Barcode,
@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button';
 import { Field, FormError, Input, Select } from '@/components/ui/input';
 import { ApiError, api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
+import { computeCartTotals } from '@/lib/cart';
 import { normalizeBarcode, useBarcodeHandler, type ScanResult } from '@/lib/barcode/BarcodeManager';
 import { cn } from '@/lib/cn';
 import { money, qty } from '@/lib/format';
@@ -69,38 +70,7 @@ export function PdvPage() {
 
   /* ---------------- Totais ---------------- */
 
-  const totals = useMemo(() => {
-    let subtotal = 0;
-    let discount = 0;
-    for (const line of lines) {
-      const gross = line.unitPriceCents * line.quantity;
-      subtotal += gross;
-      discount += applyPercentDiscount(gross, line.discountPercent);
-    }
-    const total = subtotal - discount;
-    // Custo proporcional ao preco, para o lucro nao depender do desconto
-    // estar sempre no mesmo item.
-    const cost = lines.reduce(
-      (sum, line) =>
-        sum +
-        (line.unitPriceCents > 0
-          ? Math.round(
-              (applyPercentDiscount(line.unitPriceCents * line.quantity, line.discountPercent) /
-                line.unitPriceCents) *
-                line.costCents,
-            )
-          : line.costCents * line.quantity),
-      0,
-    );
-    return {
-      subtotal,
-      discount,
-      total,
-      profit: total - cost,
-      margin: marginFromPrice(total, cost),
-      items: lines.reduce((sum, line) => sum + line.quantity, 0),
-    };
-  }, [lines]);
+  const totals = useMemo(() => computeCartTotals(lines), [lines]);
 
   /* ---------------- Acoes de carrinho ---------------- */
 
@@ -761,11 +731,7 @@ function PaymentModal({
         quantity: l.quantity,
         unit: l.unit as any,
         unitPriceCents: l.unitPriceCents,
-        totalCents: Math.round(
-          (applyPercentDiscount(l.unitPriceCents * l.quantity, l.discountPercent) /
-            (l.unitPriceCents * l.quantity || 1)) *
-            l.unitPriceCents * l.quantity,
-        ),
+        totalCents: applyPercentDiscount(l.unitPriceCents * l.quantity, l.discountPercent),
         discountPercent: l.discountPercent,
       })),
       subtotalCents: totals.subtotal,
@@ -790,11 +756,7 @@ function PaymentModal({
         quantity: l.quantity,
         unit: l.unit as any,
         unitPriceCents: l.unitPriceCents,
-        totalCents: Math.round(
-          (applyPercentDiscount(l.unitPriceCents * l.quantity, l.discountPercent) /
-            (l.unitPriceCents * l.quantity || 1)) *
-            l.unitPriceCents * l.quantity,
-        ),
+        totalCents: applyPercentDiscount(l.unitPriceCents * l.quantity, l.discountPercent),
         discountPercent: l.discountPercent,
       })),
       subtotalCents: totals.subtotal,
